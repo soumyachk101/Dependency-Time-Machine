@@ -1,6 +1,10 @@
 // Typed client for the DTM control-plane API. Every call returns a
 // discriminated result so pages render explicit loading / error / empty
 // states rather than silently showing a stale or fabricated value.
+//
+// Wire-format convention: the control plane emits camelCase JSON for the
+// report/diff/run shapes consumed by this client (see the Go JSON tags in
+// internal/core/model.go and internal/report/report.go).
 
 export type Severity =
   | "confirmed_failure"
@@ -24,7 +28,10 @@ export interface DiffEntry {
     | "unchanged";
   baseDirect: boolean;
   candDirect: boolean;
+  baseIntegrity?: string;
+  candIntegrity?: string;
   transitiveImpact: number;
+  changedDirect: boolean;
 }
 
 export interface GraphDiff {
@@ -41,7 +48,7 @@ export interface Evidence {
 export interface Finding {
   dimension: string;
   severity: Severity;
-  package: string;
+  package?: string;
   summary: string;
   confidence: number;
   evidence: Evidence[];
@@ -71,7 +78,7 @@ export interface Report {
     baseLockSha: string;
     candLockSha: string;
     runnerImage: string;
-    runnerMode: "container" | "degraded" | string;
+    runnerMode: string;
     commands: string[];
     sampleData?: boolean;
   };
@@ -92,23 +99,16 @@ export interface Report {
 // Run summary as returned by POST /v1/upgrade-runs.
 export interface RunSummary {
   id: string;
-  project_id: string;
-  repo_url: string;
-  commit_sha: string;
-  runner_mode: string;
+  projectId: string;
+  repoUrl: string;
+  commitSha: string;
+  runnerMode: string;
   executed: boolean;
-  result_class: Severity;
-  advisory_feed: string;
-  changed_count: number;
-  report_url: string;
-  graph_diff_url: string;
-}
-
-export interface ListableRun {
-  id: string;
-  repo_url: string;
-  commit_sha: string;
-  result_class: string;
+  resultClass: Severity;
+  advisoryFeed: string;
+  changedCount: number;
+  reportUrl: string;
+  graphDiffUrl: string;
 }
 
 /**
@@ -120,11 +120,12 @@ export type ApiResult<T> =
   | ({ ok: true; data: T } & { status: number })
   | { ok: false; status: number; error: string };
 
-const BASE = ""; // same-origin; Vite dev proxy routes /v1 to the Go server
+// Same-origin base; Vite's dev proxy forwards /v1 to the Go control plane.
+const BASE = "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {
   try {
-    const res = await fetch(path, {
+    const res = await fetch(BASE + path, {
       ...init,
       headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     });
@@ -181,9 +182,3 @@ export function getGraphDiff(id: string) {
 export function getReport(id: string) {
   return request<Report>(`/v1/upgrade-runs/${id}/report`);
 }
-
-// A minimal runs listing. The API's POST /v1/upgrade-runs returns the full
-// summary; listing all runs for the timeline-of-versions view is derived
-// client-side from a session's initiated runs until a GET /v1/upgrade-runs
-// collection endpoint ships (documented limitation, see docs/known-limitations).
-export const _BASE = BASE;
