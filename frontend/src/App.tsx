@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { RepositoriesPage } from "./pages/RepositoriesPage";
 import { RunsPage } from "./pages/RunsPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
+import { DependencyGraphPage } from "./pages/DependencyGraphPage";
 import { PoliciesPage } from "./pages/PoliciesPage";
 import { EnvironmentsPage } from "./pages/EnvironmentsPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -49,6 +50,7 @@ export function App() {
           {route === "/" && <RepositoriesPage />}
           {route === "/runs" && <RunsPage />}
           {isRunDetail && <RunDetailPage runId={route.split("/")[2] ?? ""} />}
+          {route === "/graph" && <DependencyGraphPage />}
           {route === "/policies" && <PoliciesPage />}
           {route === "/environments" && <EnvironmentsPage />}
           {route === "/settings" && <SettingsPage />}
