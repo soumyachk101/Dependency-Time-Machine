@@ -9,21 +9,16 @@ All env var names, endpoints, and risk-bucket names below are copied from
 the actual DTM code, not invented:
 
 - Endpoint: `POST /v1/upgrade-runs` (`internal/api/server.go`).
-- Report shape: `GET /v1/upgrade-runs/{id}/report` → JSON with a
-  `report.buckets` object. Bucket fields are **camelCase** on the wire
-  (see `frontend/src/api/client.ts` `Report` and `internal/report`).
-- Risk-bucket severity names come from `internal/risk` and the server's
-  `allSeverities()`:
-  - `confirmed_failure` (highest — the "block" bucket)
-  - `strong_warning` (the "warn" bucket)
-  - `review_suggested`
-  - `no_issue_observed`
-- `Report.buckets` (wire names) map to those:
-  - `confirmedFailures: string[]`  → `confirmed_failure`
-  - `strongWarnings: string[]`     → `strong_warning`
-  - `reviewSuggested: string[]`    → `review_suggested`
-  - `noIssueObserved: boolean`     → `no_issue_observed`
-  - `report.highest` is the max severity across findings.
+- Report shape: `GET /v1/upgrade-runs/{id}/report` (Accept
+  `application/json`) → the machine report JSON. Its top-level keys are
+  `meta`, `diff`, `findings`, `buckets`, `highest`, `missing`, `notes`,
+  `advisories` (camelCase; `internal/report/report.go` `JSON()`). The
+  bucket fields (`core.RiskBuckets`, `internal/core/model.go`) are:
+  - `buckets.confirmedFailures: string[]`  → `confirmed_failure`
+  - `buckets.strongWarnings: string[]`     → `strong_warning`
+  - `buckets.reviewSuggested: string[]`    → `review_suggested`
+  - `buckets.noIssueObserved: boolean`     → `no_issue_observed`
+  - plus top-level `highest` = the max severity across findings.
 
 **"High" risk = `confirmedFailures` + `strongWarnings` are non-empty**
 (== `highest` is `confirmed_failure` or `strong_warning`). This mirrors
@@ -53,8 +48,9 @@ on:
 # Adjust the globs to whatever your project tracks.
 #
 # NOTE: the `pull_request` event has no `changed_files` property; the
-# filter below calls the API once per PR (cheap, cached within a run)
-# and compares against the base branch.
+# filter step below computes it locally with `git diff` between the base
+# SHA and the PR head (checkout uses fetch-depth: 0, so both sides are
+# present).
 env:
   DTM_SERVER_URL: ${{ vars.DTM_SERVER_URL }}     # e.g. http://127.0.0.1:8080
   # The DTM project identifier for this repo (owner/repo), DTM convention:
@@ -159,11 +155,14 @@ jobs:
         id: gate
         run: |
           set -euo pipefail
-          HIGH=$(jq -r '.report.buckets.confirmedFailures | length' report.json)
-          WARN=$(jq -r '.report.buckets.strongWarnings | length' report.json)
-          HIGHEST=$(jq -r '.report.highest' report.json)
+          # Machine report JSON: top-level `highest` + `buckets` (camelCase
+          # fields; see internal/report + internal/core model.go).
+          HIGH=$(jq -r '.buckets.confirmedFailures | length' report.json)
+          WARN=$(jq -r '.buckets.strongWarnings | length' report.json)
+          HIGHEST=$(jq -r '.highest' report.json)
           echo "high buckets: confirmed_failures=$HIGH strong_warnings=$WARN (highest=$HIGHEST)"
-          # "High" = confirmed_failures + strong_warnings non-empty.
+          # "High" = confirmed_failures + strong_warnings non-empty
+          # (== the default policy's block+warn tiers in internal/ci).
           if [ "$((HIGH + WARN))" -gt 0 ]; then
             echo "blocking=true" >> "$GITHUB_OUTPUT"
             echo "verdict=block" >> "$GITHUB_OUTPUT"
@@ -193,17 +192,17 @@ jobs:
             }" || true
 
           # 2) Concise comment with the top findings + a link to the full report.
-          # NOTE: the machine Report has no `reportUrl` field (that key is on
+          # NOTE: the machine report has no `reportUrl` field (that key is on
           # the run summary, not the report body) — use the URL we built above.
           {
             echo "## Dependency Time Machine — upgrade risk"
             echo
             jq -r '
-              "- highest severity: \(.report.highest)"
-              + "- confirmed failures: \(.report.buckets.confirmedFailures | length)"
-              + "- strong warnings: \(.report.buckets.strongWarnings | length)"
-              + "- review suggested: \(.report.buckets.reviewSuggested | length)"
-            ' report.json | sed '1s/^/- /'
+              "- highest severity: \(.highest)"
+              + "- confirmed failures: \(.buckets.confirmedFailures | length)"
+              + "- strong warnings: \(.buckets.strongWarnings | length)"
+              + "- review suggested: \(.buckets.reviewSuggested | length)"
+            ' report.json
             echo
             echo "[Full report and evidence → ${REPORT_URL}]"
           } > dtm-comment.md
