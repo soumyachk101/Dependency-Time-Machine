@@ -50,12 +50,15 @@ func indexGraph(g *core.Graph) map[nodeKey]*nodeInfo {
 		rev[tk][fk] = struct{}{}
 	}
 
-	// Flood fill: dependants[k] = transitive closure of rev[k].
-	// Iterate in deterministic key order so counts are stable.
+	// For each package, count its transitive dependants (the size of its
+	// closure in the rev graph) — this is the "dependency reach" number
+	// the risk engine scores against.
 	keys := sortedKeys(rev)
-	closure := make(map[nodeKey]map[nodeKey]struct{})
 	for _, k := range keys {
-		seen := make(map[nodeKey]struct{})
+		if _, ok := infos[k]; !ok {
+			continue
+		}
+		seen := map[nodeKey]struct{}{}
 		queue := make([]nodeKey, 0, len(rev[k]))
 		for d := range rev[k] {
 			seen[d] = struct{}{}
@@ -71,12 +74,7 @@ func indexGraph(g *core.Graph) map[nodeKey]*nodeInfo {
 				}
 			}
 		}
-		closure[k] = seen
-		for d := range seen {
-			if info, ok := infos[d]; ok {
-				info.dependants++
-			}
-		}
+		infos[k].dependants = len(seen)
 	}
 	return infos
 }
