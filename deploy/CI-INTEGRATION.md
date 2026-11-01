@@ -57,8 +57,9 @@ env:
   DTM_PROJECT_ID: ${{ github.repository }}
 
 permissions:
-  pull-requests: write
-  contents: read
+  pull-requests: write   # posting the PR comment
+  statuses: write       # posting the commit status check (the gate)
+  contents: read         # checkout
 
 jobs:
   dtm-upgrade:
