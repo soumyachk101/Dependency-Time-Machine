@@ -86,7 +86,7 @@ func ToGraph(g *GraphOut, snapID string) *core.Graph {
 		return &core.Graph{SnapshotID: snapID}
 	}
 	eco := core.Ecosystem(g.Ecosystem)
-	out := &core.Graph{SnapshotID: snapID}
+	out := &core.Graph{SnapshotID: snapID, EcoName: g.Ecosystem}
 	versionByName := map[string]string{}
 	for _, p := range g.Packages {
 		versionByName[p.Name] = p.Version
