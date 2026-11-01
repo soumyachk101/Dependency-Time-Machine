@@ -68,9 +68,9 @@ type Graph struct {
 	SnapshotID  string
 	LockfileSHA string   `json:"lockfile_sha"`
 	CommitSHA   string   `json:"commit_sha,omitempty"`
+	EcoName     string   `json:"ecosystem"` // raw ecosystem label (node|python|rust)
 	Packages    []PackageVersion `json:"packages"`
 	Edges       []Edge           `json:"edges"`
-	// byName maps Identity->version and is filled by NewGraph.
 }
 
 // NewGraph builds the index maps. It panics only on nil input.
