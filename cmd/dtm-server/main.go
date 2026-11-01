@@ -93,7 +93,11 @@ func main() {
 	// file) is the intended production credential; deriving an
 	// installation token from it is a documented limitation of this
 	// environment, so until then posting reports "skipped_no_token".
-	ghToken := *githubTokenOrNil(cfg)
+	ghTokenPtr := githubTokenOrNil(cfg)
+	ghToken := ""
+	if ghTokenPtr != nil {
+		ghToken = *ghTokenPtr
+	}
 	gh := ci.NewGitHub("", ghToken)
 	osv := advisory.NewOSVClient(cfg.OSVEndpoint)
 	notes := relnotes.NewClient()
