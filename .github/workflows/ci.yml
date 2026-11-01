@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "frontend/**"
+  pull_request:
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "frontend/**"
+
+jobs:
+  go:
+    name: Go (build + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # go test is hermetic: the test files are pure (parser/graphd/ci/
+      # risk) and never start a runner or open a network connection.
+      # DTM_DISABLE_DOCKER_PROBE is set defensively in case a future test
+      # touches runner.New.
+      - name: Build
+        working-directory: .
+        run: go build ./...
+
+      - name: Vet
+        working-directory: .
+        run: go vet ./...
+
+      - name: Test
+        working-directory: .
+        run: DTM_DISABLE_DOCKER_PROBE=1 go test ./...
+
+  frontend:
+    name: Frontend (typecheck + build + lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install
+        working-directory: frontend
+        run: npm install
+
+      # tsc -b typechecks both projects (app + vite.config.ts via
+      # tsconfig.node.json); vite build produces dist/.
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
