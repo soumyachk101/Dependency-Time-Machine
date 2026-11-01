@@ -1,0 +1,141 @@
+# Dependency Time Machine — single-host compose.
+#
+# Default (no profile): `docker compose up -d`
+#   → dtm-server on SQLite (dev default), listening on :8080, data in ./data.
+#
+# Other argsets are behind named profiles and are mutually exclusive on the
+# control-plane port (:8080). Pick the data-layer argset you want:
+#
+#   # Production shape: Postgres backend (flips the single dtm-server to
+#   # postgres via env; the postgres service starts on this profile).
+#   DTM_DATA_DRIVER=postgres \
+#   DTM_DATABASE_URL='postgres://dtm:change-me@postgres:5432/dtm?sslmode=disable' \
+#   DTM_PG_PASSWORD=change-me \
+#   docker compose --profile postgres up -d
+#
+#   # Add the operator workbench (nginx on :8081, proxies /v1 + /api to the
+#   # running control plane — deploy/dtm-frontend-nginx.conf).
+#   docker compose --profile frontend up -d
+#
+#   # runner-pool — see the dedicated label on that service below.
+#   docker compose --profile runner-pool up -d
+#
+# Every env var name and port in this file is verified against
+# internal/config/config.go (see deploy/GUIDE.md §1 for the full table).
+
+services:
+  # ---- control plane: SQLite by default; Postgres via env --------------
+  # One server, one port. The data layer is switched by env (config.Load),
+  # not by a second service, so the two argsets never collide on :8080.
+  dtm-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dtm-server:local
+    environment:
+      # Dev default is sqlite (config.go); a plain `up -d` leaves these unset
+      # → SQLite. The postgres argset below (and managed-Postgres, GUIDE §3)
+      # override both.
+      DTM_DATA_DRIVER: ${DTM_DATA_DRIVER:-sqlite}
+      # Empty by default. When DTM_DATA_DRIVER=postgres the server exits 2 at
+      # boot if this is empty (cmd/dtm-server), so the postgres argset always
+      # sets it. Host part is the compose service name `postgres`.
+      DTM_DATABASE_URL: ${DTM_DATABASE_URL:-}
+      # Container must bind all interfaces (config default is 127.0.0.1).
+      DTM_HTTP_ADDR: 0.0.0.0:8080
+      DTM_LOG_LEVEL: INFO
+      # Execution-isolation boundary: auto = probe docker, else safe degraded.
+      # Set DTM_RUNNER_MODE explicitly in any real deployment (GUIDE §3).
+      DTM_RUNNER_MODE: ${DTM_RUNNER_MODE:-auto}
+    volumes:
+      # Used by the SQLite argset; harmless (unused) under postgres.
+      - ./data:/data
+    ports:
+      - "8080:8080"
+    healthcheck:
+      # /healthz is registered outside the rate limiter (internal/api/server.go).
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      # No-op with a warning when the postgres profile is inactive (plain dev
+      # `up -d`); under `--profile postgres` it gates the server on a healthy db
+      # so the store migration at boot does not race the database.
+      postgres:
+        condition: service_healthy
+
+  # ---- production argset: the Postgres database ------------------------
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_USER: dtm
+      # dev single-host default; override via env for anything shared.
+      POSTGRES_PASSWORD: "${DTM_PG_PASSWORD:-change-me}"
+      POSTGRES_DB: dtm
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dtm -d dtm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not published on the host; the server reaches it on the compose
+    # network. Uncomment for external tooling:
+    # ports:
+    #   - "5432:5432"
+
+  # ---- operator workbench (only if its Dockerfile landed) -------------
+  # nginx proxies /v1 and /api same-origin to the control plane; the API
+  # client in frontend/src/api/client.ts fetches BASE="" (same origin).
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: dtm-frontend:local
+    profiles: ["frontend"]
+    depends_on:
+      - dtm-server
+    ports:
+      - "8081:80"
+
+  # =====================================================================
+  # runner-pool — ADVANCED. The container-isolated build/test execution
+  # boundary from the spec's isolation requirements
+  # (docs/EXECUTION-ISOLATION-LIMITS.md, "Container mode").
+  #
+  #   - NOT part of local dev. Plain `docker compose up -d` never starts
+  #     it: it is wired behind the named profile `runner-pool` only.
+  #   - Requires a container runtime (docker) on the host. The docker
+  #     socket is mounted into this sidecar ONLY under this profile; the
+  #     default/up-dev path never touches the host runtime.
+  #   - This is a clearly-labelled, not-wired-up boundary marker. It is
+  #     NOT a managed worker pool. Without it — or without docker at all
+  #     — the safe-degraded mode documented in docs/ is what runs:
+  #     manifest/graph analysis only, `Executed: false`, never read as
+  #     build/test verification.
+  #   - The control plane probes docker itself in auto mode
+  #     (internal/runner/runner.go). On a host where dtm-server can already
+  #     reach docker, this sidecar is unnecessary.
+  # =====================================================================
+  runner-pool:
+    image: docker:27-cli
+    profiles: ["runner-pool"]
+    depends_on:
+      - dtm-server
+    volumes:
+      # Host docker runtime, mounted ONLY when this profile is selected.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Documented argset for the container-runner mode the control plane
+      # honours (defaults mirrored from internal/config/config.go):
+      DTM_RUNNER_MODE: container
+      DTM_DOCKER_IMAGE: ${DTM_DOCKER_IMAGE:-ghcr.io/ensembyte/dtm-runner:1.0.0}
+      DTM_RUNNER_CPU_LIMIT: ${DTM_RUNNER_CPU_LIMIT:-2}
+      DTM_RUNNER_MEMORY_LIMIT: ${DTM_RUNNER_MEMORY_LIMIT:-4g}
+      DTM_RUNNER_DISK_LIMIT: ${DTM_RUNNER_DISK_LIMIT:-10g}
+      DTM_RUNNER_WALL_CLOCK_LIMIT: ${DTM_RUNNER_WALL_CLOCK_LIMIT:-1800s}
+
+volumes:
+  pg-data:
