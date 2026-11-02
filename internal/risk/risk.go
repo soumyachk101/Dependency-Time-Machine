@@ -280,6 +280,24 @@ func Evaluate(in Inputs) *Report {
 // ---- helpers ----------------------------------------------------------------
 
 // diffEntries is a nil-safe extractor for the diff's entry list.
+// execFinding builds an execution-outcome finding from build/test
+// failure lines, keeping the "isolation boundary" clear: no executed
+// evidence means no regression claim (the caller emits a degraded
+// finding instead).
+func execFinding(dimension, severity, summary string, failures []string, confidence float64) core.Finding {
+	var ev []core.Evidence
+	for _, f := range failures {
+		ev = append(ev, core.Evidence{Kind: "test_result", Label: f})
+	}
+	return core.Finding{
+		Dimension:  dimension,
+		Severity:   severity,
+		Summary:    summary,
+		Evidence:   ev,
+		Confidence: confidence,
+	}
+}
+
 func diffEntries(d *core.GraphDiff) []core.DiffEntry {
 	if d == nil {
 		return nil
