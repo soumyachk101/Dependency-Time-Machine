@@ -43,9 +43,6 @@ interface Props {
   ariaLabel?: string;
 }
 
-// Critically-damped spring step: x' = x + (target - x) * (1 - e^-dt/τ).
-const TAU_MS = 120;
-
 export function SnapshotCarousel({
   items,
   activeId,
