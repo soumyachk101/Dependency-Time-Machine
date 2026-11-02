@@ -30,7 +30,11 @@ func DetectRust(files map[string][]byte) (manifest, lock string, ok bool) {
 	return manifest, lock, manifest != ""
 }
 
-// CargoManifest is the subset of Cargo.toml the parser needs.
+// CargoManifest is the subset of Cargo.toml the parser needs. The
+// dependency tables accept either string ("1.0") or table
+// ({version, features, git, ...}) entries — we only read the keys, so
+// the value is typed any (BurntSushi rejects a table-typed value for a
+// string scalar, but any accepts both shapes).
 type CargoManifest struct {
 	Project    struct{} `toml:"project"` // may be present, unused
 	Package    struct {
@@ -38,14 +42,17 @@ type CargoManifest struct {
 		Version string `toml:"version"`
 		Authors []string `toml:"authors"`
 	} `toml:"package"`
-	Dependencies     map[string]CargoDep `toml:"dependencies"`
-	DevDependencies  map[string]CargoDep `toml:"dev-dependencies"`
-	BuildDependencies map[string]CargoDep `toml:"build-dependencies"`
+	Dependencies     map[string]any `toml:"dependencies"`
+	DevDependencies  map[string]any `toml:"dev-dependencies"`
+	BuildDependencies map[string]any `toml:"build-dependencies"`
 	Features         map[string][]string `toml:"features"`
 }
 
-// CargoDep is a dependency table entry: either a string ("1.0.0") or a
-// table ({ version = "...", features = [...], git = "..." }).
+// CargoDep documents the table form of a dependency entry
+// ({ version, features, git, branch, rev }); the string form is also
+// legal in Cargo.toml. The parser only reads dependency names (map
+// keys), so this struct is kept for reference and not wired into the
+// manifest type.
 type CargoDep struct {
 	Version string `toml:"version"`
 	Path    string `toml:"path"`
@@ -108,7 +115,7 @@ func ParseRust(manifestTOML, lockTOML []byte) (*GraphOut, error) {
 			Source:    sourceLabel(p.Source),
 			DependsOn: p.DependsOn,
 		})
-		for dep := range p.DependsOn {
+		for _, dep := range p.DependsOn {
 			out.Edges = append(out.Edges, EdgeOut{
 				From:     p.Name,
 				FromVer:  p.Version,
