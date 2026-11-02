@@ -202,7 +202,7 @@ export function SettingsPage() {
             >
               {testBusy ? "Testing intake…" : "Test webhook intake"}
             </button>
-            {testBusy ? <Loading label="Sending a synthetic event to " + webhook.endpoint + "…" /> : null}
+            {testBusy ? <Loading label={"Sending a synthetic event to " + webhook.endpoint + "…"} /> : null}
             {testResult ? (
               testResult.ok ? (
                 <p className="mono" style={{ fontSize: "0.8125rem", color: "var(--success)" }}>{testResult.text}</p>
@@ -231,7 +231,7 @@ export function SettingsPage() {
                 onChange={(e) => setGithub({ ...github, appId: e.target.value })} />
             </label>
             <label style={{ display: "grid", gap: 4, fontSize: "0.8125rem" }}>
-              <span style={{ color: "var(--text-muted)" }>Private key file</span>
+              <span style={{ color: "var(--text-muted)" }}>Private key file</span>
               <input className="mono" value={github.keyFile} style={inputStyle}
                 onChange={(e) => setGithub({ ...github, keyFile: e.target.value })} />
             </label>
