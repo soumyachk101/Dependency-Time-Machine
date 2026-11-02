@@ -130,12 +130,12 @@ func main() {
 		BaseURL:       cfg.StaticDir,
 	}, gh, osv, notes, logger, runs)
 
-	// /readyz readiness: the durable store must be reachable; in memory
-	// mode there is nothing to probe, so the server is always ready.
+	// /readyz readiness: with a durable store it must be reachable
+	// (Ping); in memory mode there is nothing to probe, so the server is
+	// always ready.
 	if runStore != nil {
 		srv.Ready = func() bool {
-			_ = runStore.Ping()
-			return true
+			return runStore.Ping() == nil
 		}
 	}
 
