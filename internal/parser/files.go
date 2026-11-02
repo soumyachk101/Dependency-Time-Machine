@@ -22,7 +22,7 @@ func Detect(files Files) []string {
 	if _, _, ok := DetectPython(files); ok {
 		out = append(out, "python")
 	}
-	if _, ok := DetectRust(files); ok {
+	if _, _, ok := DetectRust(files); ok {
 		out = append(out, "rust")
 	}
 	sort.Strings(out)
@@ -30,11 +30,14 @@ func Detect(files Files) []string {
 }
 
 // ParseFiles parses every supported ecosystem present in the file set and
-// returns the merged graph(s). Each returned Graph is labelled with its
-// source lockfile so the run report can record per-ecosystem provenance.
+// returns the parsed graphs, one per ecosystem. A partial failure (one
+// ecosystem's files malformed, others fine) returns the successful graphs
+// plus an *AggregateError so callers can proceed with what they have while
+// still knowing something was skipped.
 func ParseFiles(files Files) ([]*GraphOut, error) {
 	var out []*GraphOut
 	var errs []string
+
 	if m, l, ok := DetectNode(files); ok && l != "" {
 		g, err := ParseNode(files[m], files[l], l)
 		if err != nil {
@@ -43,22 +46,20 @@ func ParseFiles(files Files) ([]*GraphOut, error) {
 			out = append(out, g)
 		}
 	}
-	if m, l, ok := DetectPython(files); ok && l != "" && l != "requirements.txt" {
-		// requirements.txt-only repos are parsed in the shared branch below.
-		g, err := ParsePython(files[l])
-		if err != nil {
-			errs = append(errs, "python: "+err.Error())
-		} else {
-			out = append(out, g)
-		}
-	} else if m, _, ok := DetectPython(files); ok && m == "requirements.txt" {
-		g, err := ParsePython(files["requirements.txt"])
+
+	// Python: the manifest is a requirements-style file; the "lock" may be
+	// the same file (requirements.txt pins are already resolved) or a
+	// dedicated lock. Either way the parser's input is the manifest
+	// content itself.
+	if m, _, ok := DetectPython(files); ok {
+		g, err := ParsePython(files[m])
 		if err != nil {
 			errs = append(errs, "python: "+err.Error())
 		} else {
 			out = append(out, g)
 		}
 	}
+
 	if m, l, ok := DetectRust(files); ok && l != "" {
 		g, err := ParseRust(files[m], files[l])
 		if err != nil {
@@ -67,6 +68,7 @@ func ParseFiles(files Files) ([]*GraphOut, error) {
 			out = append(out, g)
 		}
 	}
+
 	if len(errs) > 0 {
 		return out, &AggregateError{Msg: strings.Join(errs, "; ")}
 	}
