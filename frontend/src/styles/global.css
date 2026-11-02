@@ -1,0 +1,246 @@
+/* Dependency Time Machine — global layout, background, and base element
+   styles. Background is a dependency-edge contour texture: an inline SVG
+   data-URI at very low opacity, purely decorative, static (never
+   animated — spec: no continuously moving full-viewport backgrounds), and
+   kept behind a solid readable surface wherever dense tables render. */
+
+@import url("./tokens.css");
+
+html {
+  font-size: 16px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 0.875rem; /* 14px base for a dense technical layout */
+  line-height: 1.5;
+  color: var(--text-primary);
+  background-color: var(--canvas);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Tabular numerals for all version/timing/count readings. */
+  font-feature-settings: "tnum" 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Dependency-edge contour background layer. Restrained: near-invisible,
+   low-contrast, never under a solid surface (tables set their own bg). */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: var(--bg-texture-opacity);
+  background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240' viewBox='0 0 240 240'%3E%3Cg fill='none' stroke='%23bdbdbd' stroke-width='1'%3E%3Cpath d='M0 60 H240 M0 120 H240 M0 180 H240'/%3E%3Cpath d='M60 0 V240 M120 0 V240 M180 0 V240'/%3E%3Ccircle cx='60' cy='60' r='3' fill='%23bdbdbd' stroke='none'/%3E%3Ccircle cx='120' cy='120' r='3' fill='%23bdbdbd' stroke='none'/%3E%3Ccircle cx='180' cy='180' r='3' fill='%23bdbdbd' stroke='none'/%3E%3Cpath d='M60 60 L120 120 L180 180' stroke-dasharray='2 4'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 240px 240px;
+  background-repeat: repeat;
+}
+
+/* Reduced transparency: drop the translucent texture entirely. */
+@media (prefers-reduced-transparency: reduce) {
+  body::before {
+    display: none;
+  }
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: var(--tracking-display);
+  line-height: 1.08;
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.5rem;
+}
+h2 {
+  font-size: 1.125rem;
+  letter-spacing: var(--tracking-label);
+}
+h3 {
+  font-size: 0.95rem;
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--accent-hover);
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
+/* Focus visibility on interactive controls only. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background-color var(--dur-150) var(--ease-out);
+}
+button:active {
+  background: var(--surface-2);
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--text-primary);
+  background: var(--canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+
+/* Content frame: one dominant work surface, deliberate max-width. */
+.shell {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 0 var(--space-6);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 900px) {
+  .shell {
+    padding: 0 var(--space-4);
+  }
+}
+
+/* Density primitives: tables are the primary surface, not cards. */
+.dtm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+.dtm-table th,
+.dtm-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.dtm-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.6875rem;
+  background: var(--surface-1);
+}
+.dtm-table td {
+  background: var(--canvas);
+}
+.dtm-table tr:hover td {
+  background: var(--surface-1);
+}
+
+/* Status strip: a compact single-row metric band, not a card grid. */
+.status-strip {
+  display: flex;
+  gap: var(--space-5);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+}
+.status-strip > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.status-strip .k {
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.status-strip .v {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+}
+
+.sev-confirmed_failure,
+.sev-block {
+  color: var(--danger);
+}
+.sev-strong_warning,
+.sev-warn {
+  color: var(--warning);
+}
+.sev-review_suggested {
+  color: var(--info);
+}
+.sev-no_issue_observed,
+.sev-pass {
+  color: var(--success);
+}
+
+/* Semantic banner used by degraded-mode + sample-data notices. */
+.notice {
+  padding: var(--space-3) var(--space-4);
+  border-left: 3px solid var(--warning);
+  background: var(--surface-1);
+  font-size: 0.8125rem;
+}
+
+/* Page skeleton: header + main + a left nav rail (clear task: navigation). */
+.app-grid {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  flex: 1;
+  min-height: calc(100vh - 56px);
+}
+.app-rail {
+  border-right: 1px solid var(--border-subtle);
+  padding: var(--space-5) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  background: var(--surface-1);
+}
+.app-main {
+  padding: var(--space-6);
+  min-width: 0;
+}
+@media (max-width: 800px) {
+  .app-grid {
+    grid-template-columns: 1fr;
+  }
+  .app-rail {
+    display: none;
+  }
+}
