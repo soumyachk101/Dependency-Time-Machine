@@ -133,10 +133,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<ApiResult<T
     let body: unknown = null;
     if (isJson) body = await res.json();
     if (!res.ok) {
-      const msg =
-        (body && typeof body === "object" && "error" in body
-          ? String((body as { error?: string }).error)
-          : res.statusText) || "request failed";
+      // The control plane returns the shared envelope
+      // {"error":{"code","message"}}; older builds may carry a bare
+      // {"error": "string"}. Read both shapes so the visible message is
+      // never "[object Object]".
+      let msg = "";
+      if (body && typeof body === "object" && "error" in body) {
+        const e = (body as { error: unknown }).error;
+        msg =
+          typeof e === "string"
+            ? e
+            : e && typeof e === "object" && "message" in e
+              ? String((e as { message?: string }).message)
+              : "";
+      }
+      msg = msg || res.statusText || "request failed";
       return { ok: false, status: res.status, error: msg };
     }
     return { ok: true, data: body as T, status: res.status };
