@@ -1,0 +1,996 @@
+openapi: 3.0.3
+info:
+  title: Dependency Time Machine — control-plane API
+  version: "1.0.0"
+  description: |
+    Dependency Time Machine evaluates proposed dependency upgrades before they
+    merge: it compares base vs candidate dependency graphs, inspects release
+    notes and security advisories, and produces an evidence-backed risk report
+    plus a CI check. The API described here is the Go control plane
+    (`internal/api`): operator auth, per-class rate limits, webhook HMAC
+    verification and the shared error envelope.
+
+    **Execution model.** Container-isolated runner execution is the documented
+    path (`DTM_RUNNER_MODE=container`). When no container runtime is available
+    the server runs in *safe degraded* mode, which performs manifest/graph
+    level analysis only — no build or test command is executed, and reports
+    never claim that builds or tests ran. `runnerMode: "degraded"` with
+    `executed: false` in responses means analysis-only.
+
+    The API pipeline (`POST /v1/upgrade-runs`) itself is analysis-only and
+    stores runs with `runnerMode: "degraded"`, `executed: false`. Runs
+    produced by an isolated runner or the `dtm` CLI are ingested via
+    `POST /v1/cli-runs`.
+
+    Every non-2xx response uses the shared error envelope
+    `{"error":{"code","message"}}` (see components.responses.Error).
+    All bodies are capped at 2 MiB (413 `err_payload_too_large` above that).
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local dev default (env DTM_HTTP_ADDR)
+security:
+  - operatorBearer: []
+tags:
+  - name: analysis
+    description: Upgrade-run pipeline (rate-limit class: analysis)
+  - name: repos
+    description: Repository, snapshot, policy and CLI-run intake (rate-limit class: repos)
+  - name: webhooks
+    description: GitHub webhook intake (rate-limit class: webhooks; HMAC auth)
+  - name: reads
+    description: Run, graph-diff and report retrieval (rate-limit class: reads)
+  - name: ops
+    description: Liveness / readiness probes (unthrottled, unauthenticated)
+paths:
+  /v1/upgrade-runs:
+    post:
+      tags: [analysis]
+      operationId: createUpgradeRun
+      summary: Run a base-vs-candidate dependency upgrade evaluation
+      description: |
+        Runs the analysis pipeline for a base revision against a candidate
+        revision (manifest files, optional lockfile bytes, release-note and
+        advisory feeds) and stores the result. Idempotency: a request that
+        replays a stored `idempotency_key` (same project + candidate SHA)
+        returns the stored result with 200; the same key with different
+        content returns 409 `err_conflict`. Pipeline errors on
+        client-supplied content surface as 422 `err_invalid_request`.
+
+        Rate-limit class: **analysis** (`DTM_RATE_LIMIT_ANALYSIS_RPS/_BURST`,
+        default 20/40).
+      security:
+        - operatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpgradeRunRequest'
+      responses:
+        '201':
+          description: Created; the stored run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpgradeRunResponse'
+        '200':
+          description: Idempotent replay of a stored `idempotency_key` (same project + candidate SHA); the stored result, without re-running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpgradeRunResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          description: Pipeline rejected the request content (manifest/lockfile parse or analysis failure).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/repositories/connect:
+    post:
+      tags: [repos]
+      operationId: connectRepository
+      summary: Register a repository the control plane will manage
+      description: |
+        Registers an owner/repo pair; `provider` defaults to `github` when
+        omitted. The returned `project_id` is `<provider>/<owner>/<repo>`.
+
+        Rate-limit class: **repos** (`DTM_RATE_LIMIT_REPOS_RPS/_BURST`,
+        default 5/10).
+      security:
+        - operatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectRequest'
+      responses:
+        '200':
+          description: Repository registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/snapshots:
+    post:
+      tags: [repos]
+      operationId: createSnapshot
+      summary: Record one commit's manifest + lockfile content
+      description: |
+        Detects supported manifest/lockfile pairs among the supplied file
+        contents and returns a deterministic snapshot id. No supported pair
+        found: 422 `err_invalid_request`.
+
+        Rate-limit class: **repos** (default 5/10).
+      security:
+        - operatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SnapshotRequest'
+      responses:
+        '200':
+          description: Snapshot recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SnapshotResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/InvalidRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/policies:
+    post:
+      tags: [repos]
+      operationId: setPolicy
+      summary: Set a project's block/warn thresholds
+      description: |
+        `block_on` and `warn_on` must each be one of the result-class
+        severities; otherwise 400 `err_invalid_request`.
+
+        Rate-limit class: **repos** (default 5/10).
+      security:
+        - operatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyRequest'
+      responses:
+        '200':
+          description: Policy saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/webhooks/github:
+    post:
+      tags: [webhooks]
+      operationId: githubWebhook
+      summary: GitHub event intake (HMAC-verified)
+      description: |
+        Verifies `X-Hub-Signature-256` (HMAC-SHA256 of the raw body, key =
+        `DTM_GITHUB_WEBHOOK_SECRET`) in constant time, then applies an
+        `X-Hub-Delivery` nonce replay guard (15-minute in-process window; a
+        replayed nonce is 403 `err_forbidden`). Without a configured secret
+        the endpoint rejects every webhook with 401 — it never accepts
+        unauthenticated webhooks. Note: the nonce store is per-process; a
+        multi-replica deployment needs a shared nonce store
+        (see docs/SCALING.md).
+
+        Rate-limit class: **webhooks** (`DTM_RATE_LIMIT_WEBHOOKS_RPS/_BURST`,
+        default 10/20).
+
+        Security: webhook HMAC (scheme `webhookHmac`), not operator bearer.
+      security:
+        - webhookHmac: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          description: 'sha256=<hex HMAC-SHA256 of raw body, key DTM_GITHUB_WEBHOOK_SECRET>'
+          schema:
+            type: string
+        - name: X-Hub-Delivery
+          in: header
+          required: false
+          description: Per-delivery nonce; GitHub retries carry the same value, which is how replays are caught.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Raw GitHub webhook event payload (capped at 2 MiB).
+      responses:
+        '202':
+          description: Accepted. Idempotent replays are no-ops.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookAccepted'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/cli-runs:
+    post:
+      tags: [repos]
+      operationId: intakeCliRun
+      summary: Intake a completed run produced by the dtm CLI or runner
+      description: |
+        Persists a finished run (survives restart with a durable data
+        driver) and, when a GitHub token is configured, posts a check-run to
+        the CI PR. The response's `posting` field is honest: `skipped_no_token`
+        when no token is configured, `posted` on success, `failed: <reason>`
+        otherwise. If no `check_run` payload is supplied one is derived from
+        `result_class` + `executed` via the default CI policy.
+
+        Rate-limit class: **repos** (default 5/10).
+      security:
+        - operatorBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CliRunRequest'
+      responses:
+        '202':
+          description: Run ingested; check-run posting status included.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CliRunResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/upgrade-runs/{id}:
+    get:
+      tags: [reads]
+      operationId: getUpgradeRun
+      summary: Fetch a stored run
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      description: |
+        The `id` path parameter is restricted to URL-safe tokens
+        (charset `A-Za-z0-9._-`, max 128) — anything else is 400
+        `err_invalid_request`. Unknown id: 404 `err_not_found`.
+
+        Rate-limit class: **reads** (`DTM_RATE_LIMIT_READS_RPS/_BURST`,
+        default 50/100).
+      security:
+        - operatorBearer: []
+      responses:
+        '200':
+          description: The stored run summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpgradeRunResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/upgrade-runs/{id}/graph-diff:
+    get:
+      tags: [reads]
+      operationId: getUpgradeRunGraphDiff
+      summary: Fetch a run's dependency-graph diff
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+      description: |
+        404 `err_not_found` when the run is absent or no graph diff was
+        recorded for it. Rate-limit class: **reads** (default 50/100).
+      security:
+        - operatorBearer: []
+      responses:
+        '200':
+          description: The graph diff (deterministic JSON shape from the pipeline).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphDiff'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/upgrade-runs/{id}/report:
+    get:
+      tags: [reads]
+      operationId: getUpgradeRunReport
+      summary: Fetch a run's report (JSON or Markdown)
+      parameters:
+        - $ref: '#/components/parameters/RunId'
+        - name: Accept
+          in: header
+          required: false
+          description: |
+            Content negotiation is by `Accept`, not by query parameter: a
+            value containing `markdown` (case-insensitive) yields the
+            rendered Markdown report (`text/markdown`); anything else yields
+            the JSON report.
+          schema:
+            type: string
+      description: |
+        JSON response is the stored report payload (rehydrated from the
+        durable store after a restart when one is configured). 404
+        `err_not_found` when the run or its report is absent.
+        Rate-limit class: **reads** (default 50/100).
+      security:
+        - operatorBearer: []
+      responses:
+        '200':
+          description: The report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Report'
+            text/markdown:
+              schema:
+                type: string
+                description: Rendered Markdown report, with an explicit degraded-mode banner when no isolated execution was performed.
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /healthz:
+    get:
+      tags: [ops]
+      operationId: healthz
+      summary: Liveness probe
+      description: |
+        Unauthenticated and **unthrottled** (rate-limit classes do not apply
+        to /healthz and /readyz): the container HEALTHCHECK probes this
+        route, so it must never 401/429. `200 {"status":"ok"}` once the
+        process is up.
+      security: []
+      responses:
+        '200':
+          description: Process is up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+  /readyz:
+    get:
+      tags: [ops]
+      operationId: readyz
+      summary: Readiness probe
+      description: |
+        Unauthenticated and **unthrottled**. With a durable data store the
+        server is ready once the store responds to Ping; in memory mode it
+        is always ready. `200 {"status":"ready"}`, or
+        `503 {"status":"not_ready"}` while the store is unreachable.
+      security: []
+      responses:
+        '200':
+          description: Data store reachable (or memory mode).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyStatus'
+        '503':
+          description: Data store not reachable yet.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyStatus'
+components:
+  securitySchemes:
+    operatorBearer:
+      type: http
+      scheme: bearer
+      description: |
+        Operator token from `DTM_API_TOKEN` (minimum 16 characters when set).
+        Compared in constant time on every `/v1/*` route; a missing or
+        wrong token is 401 `err_unauthorized`. When `DTM_API_TOKEN` is
+        unset the API runs in dev-open mode and logs a WARN per
+        unauthenticated request instead of rejecting it.
+    webhookHmac:
+      type: apiKey
+      in: header
+      name: X-Hub-Signature-256
+      description: |
+        Webhook-only scheme: GitHub signs the raw body with
+        `DTM_GITHUB_WEBHOOK_SECRET`; the server verifies
+        `sha256=<hex>` with constant-time HMAC-SHA256 and additionally
+        guards against redelivery via the `X-Hub-Delivery` nonce header
+        (15-minute in-process replay window; replay = 403
+        `err_forbidden`). Webhooks are rejected outright (401) when no
+        secret is configured — the closed default.
+  parameters:
+    RunId:
+      name: id
+      in: path
+      required: true
+      description: Run id (URL-safe token, 1–128 chars of `A-Za-z0-9._-`); anything else is 400 `err_invalid_request`.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,128}$'
+  responses:
+    Unauthorized:
+      description: 401 — missing/invalid operator bearer token, or webhook signature failure / unconfigured webhook secret.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: 403 — webhook delivery nonce replayed within the replay window.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: 429 — over the route-class token-bucket budget (per client IP). Response carries `Retry-After: 1`.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retrying.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InvalidRequest:
+      description: 400 — invalid path/query parameter, malformed JSON, or a required field is missing.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    PayloadTooLarge:
+      description: 413 — request body exceeds the 2 MiB cap.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: 404 — unknown route, or run/graph-diff/report not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: 409 — idempotency key reused with different request content.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      description: The shared error envelope. Every non-2xx response is exactly this shape — never a bare string or a free-form body.
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable error code (full set below).
+              enum:
+                - err_unauthorized
+                - err_forbidden
+                - err_rate_limited
+                - err_invalid_request
+                - err_payload_too_large
+                - err_not_found
+                - err_conflict
+                - err_internal
+            message:
+              type: string
+              description: Human-readable detail.
+    Severity:
+      type: string
+      description: Result-class / policy severity.
+      enum:
+        - confirmed_failure
+        - strong_warning
+        - review_suggested
+        - no_issue_observed
+    AdvisoryFeed:
+      type: string
+      description: Provenance state of advisory evidence for a run.
+      enum:
+        - feed_online
+        - offline_dataset_only
+        - feed_unreachable
+        - awaiting_credentials
+    Ecosystem:
+      type: string
+      enum: [node, python, rust]
+    Identity:
+      description: Canonical package identity (ecosystem + name, never name alone).
+      type: object
+      required: [ecosystem, name]
+      properties:
+        ecosystem:
+          $ref: '#/components/schemas/Ecosystem'
+        name:
+          type: string
+        registry:
+          type: string
+          description: e.g. npmjs, crates.io, pypi; omitted when default.
+    Files:
+      type: object
+      description: Filename → file content. String values are base64-encoded in JSON transport.
+      additionalProperties:
+        type: string
+        format: byte
+    ConnectRequest:
+      type: object
+      required: [owner, repo]
+      properties:
+        owner:
+          type: string
+        repo:
+          type: string
+        provider:
+          type: string
+          description: Defaults to `github` when omitted.
+        default_branch:
+          type: string
+    ConnectResponse:
+      type: object
+      properties:
+        project_id:
+          type: string
+          description: `<provider>/<owner>/<repo>`
+        owner:
+          type: string
+        repo:
+          type: string
+        provider:
+          type: string
+        registered:
+          type: boolean
+    SnapshotRequest:
+      type: object
+      required: [commit_sha, files]
+      properties:
+        project_id:
+          type: string
+        commit_sha:
+          type: string
+        files:
+          description: Manifest + lockfile contents keyed by filename.
+          $ref: '#/components/schemas/Files'
+    SnapshotResponse:
+      type: object
+      properties:
+        snapshot_id:
+          type: string
+          description: Deterministic id: `snap-` + 12-hex-char content hash.
+        ecosystems:
+          type: array
+          items:
+            type: string
+          description: Ecosystems detected among the supplied files.
+        commit_sha:
+          type: string
+    UpgradeRunRequest:
+      type: object
+      required: [base_sha, candidate_sha]
+      properties:
+        project_id:
+          type: string
+        repo_url:
+          type: string
+        base_sha:
+          type: string
+        candidate_sha:
+          type: string
+        base_files:
+          $ref: '#/components/schemas/Files'
+        candidate_files:
+          $ref: '#/components/schemas/Files'
+        base_lockfile:
+          type: string
+          format: byte
+        candidate_lockfile:
+          type: string
+          format: byte
+        notes_enabled:
+          type: boolean
+          description: Opt into release-note retrieval (network side effect).
+        advisory_online:
+          type: boolean
+          description: Use the online advisory feed; otherwise the offline dataset only.
+        idempotency_key:
+          type: string
+          description: Replays of the same key (same project + candidate SHA) return the stored result; same key with different content is 409.
+    UpgradeRunResponse:
+      type: object
+      description: Stable wire shape of a stored run (camelCase, matching the frontend's RunSummary).
+      properties:
+        id:
+          type: string
+          description: `run-` + 12-hex-char hash (or `idem-<key>` when replayed).
+        projectId:
+          type: string
+        repoUrl:
+          type: string
+        commitSha:
+          type: string
+          description: The candidate SHA.
+        runnerMode:
+          type: string
+          enum: [degraded, container]
+          description: The API pipeline stores analysis-only runs as `degraded` with `executed: false`; container-executed runs are ingested via /v1/cli-runs.
+        executed:
+          type: boolean
+          description: Whether builds/tests were actually executed. Analysis-only runs are always `false`.
+        resultClass:
+          $ref: '#/components/schemas/Severity'
+        advisoryFeed:
+          $ref: '#/components/schemas/AdvisoryFeed'
+        changedCount:
+          type: integer
+          description: Number of graph-diff entries that are not `unchanged`.
+        reportUrl:
+          type: string
+          description: Path to GET /v1/upgrade-runs/{id}/report.
+        graphDiffUrl:
+          type: string
+          description: Path to GET /v1/upgrade-runs/{id}/graph-diff.
+    PolicyRequest:
+      type: object
+      required: [project_id, block_on, warn_on]
+      properties:
+        project_id:
+          type: string
+        block_on:
+          $ref: '#/components/schemas/Severity'
+        warn_on:
+          $ref: '#/components/schemas/Severity'
+    PolicyResponse:
+      type: object
+      properties:
+        project_id:
+          type: string
+        block_on:
+          $ref: '#/components/schemas/Severity'
+        warn_on:
+          $ref: '#/components/schemas/Severity'
+        saved:
+          type: boolean
+    WebhookAccepted:
+      type: object
+      properties:
+        event:
+          description: The GitHub event type, or null when the payload has none.
+          nullable: true
+        note:
+          type: string
+          description: 'Accepted; idempotent replay is a no-op.'
+    CheckRunPayload:
+      type: object
+      description: >
+        The ci.CheckRunPayload struct has no JSON tags, so fields are
+        serialised with their exact Go field names (PascalCase).
+      properties:
+        RunID:
+          type: string
+          description: Go field RunID; JSON key is the untagged Go name `RunID`.
+        State:
+          type: string
+          enum: [success, warning, failure]
+        Conclusion:
+          type: string
+        Comment:
+          type: string
+        ReportURL:
+          type: string
+    CliRunRequest:
+      type: object
+      required: [commit_sha]
+      properties:
+        project_id:
+          type: string
+        owner:
+          type: string
+        repo:
+          type: string
+        commit_sha:
+          type: string
+        runner_mode:
+          type: string
+          description: 'e.g. container (isolated execution) or degraded (analysis-only; no builds/tests ran).'
+        executed:
+          type: boolean
+          description: Whether the runner actually executed build/test commands. Must be `true` only for container-executed runs.
+        result_class:
+          $ref: '#/components/schemas/Severity'
+        check_run:
+          description: Optional pre-built check-run payload; one is derived from result_class + executed when omitted.
+          $ref: '#/components/schemas/CheckRunPayload'
+    CliRunResponse:
+      type: object
+      properties:
+        project_id:
+          type: string
+        state:
+          type: string
+          enum: [success, warning, failure]
+        conclusion:
+          type: string
+        posting:
+          type: string
+          description: 'Honest check-run posting status: `skipped_no_token`, `posted`, or `failed: <reason>`.'
+        note:
+          type: string
+          description: Present only when the run record could not be persisted.
+          example: 'run record not persisted: <store error>'
+    DiffCategory:
+      type: string
+      enum:
+        - added
+        - removed
+        - upgraded
+        - downgraded
+        - integrity_changed
+        - source_changed
+        - runtime_requirement_changed
+        - peer_resolution_changed
+        - unchanged
+    DiffEntry:
+      type: object
+      required: [identity, category]
+      properties:
+        identity:
+          $ref: '#/components/schemas/Identity'
+        baseVersion:
+          type: string
+          description: Empty when the package is absent in base.
+        candVersion:
+          type: string
+          description: Empty when the package is absent in candidate.
+        category:
+          $ref: '#/components/schemas/DiffCategory'
+        baseDirect:
+          type: boolean
+        candDirect:
+          type: boolean
+        baseIntegrity:
+          type: string
+          description: sha512/sha256 integrity hash where available.
+        candIntegrity:
+          type: string
+        transitiveImpact:
+          type: integer
+          description: Count of other packages (transitive reach) depending on this identity, computed from the base graph.
+        changedDirect:
+          type: boolean
+          description: True when a direct requirement constraint changed even if the resolved version did not.
+    GraphDiff:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiffEntry'
+        reachableChanged:
+          type: integer
+          description: Number of identities whose transitive closure contains at least one changed package.
+    Evidence:
+      type: object
+      description: Evidence reference attached to a finding (shape varies by dimension; rendered as an object in the report JSON).
+      additionalProperties: true
+    Finding:
+      type: object
+      required: [dimension, severity, summary, confidence]
+      properties:
+        dimension:
+          type: string
+          description: 'e.g. graph_reach, security, release_signal.'
+        severity:
+          $ref: '#/components/schemas/Severity'
+        package:
+          type: string
+          description: Identity string; empty for run-level findings.
+        summary:
+          type: string
+        evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evidence'
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Quality/completeness of the evidence, 0..1.
+    RiskBuckets:
+      type: object
+      description: Candidate-only, evidenced results grouped by severity.
+      properties:
+        confirmedFailures:
+          type: array
+          items:
+            type: string
+        strongWarnings:
+          type: array
+          items:
+            type: string
+        reviewSuggested:
+          type: array
+          items:
+            type: string
+        noIssueObserved:
+          type: boolean
+    ReleaseNote:
+      type: object
+      properties:
+        identity:
+          $ref: '#/components/schemas/Identity'
+        version:
+          type: string
+        sourceUrl:
+          type: string
+        retrievedAt:
+          type: string
+          description: RFC3339, or `unretrieved` when the fetch was offline.
+        body:
+          type: string
+        signals:
+          type: array
+          items:
+            type: string
+          description: Detected breaking-change labels — signals, not proof.
+    Advisory:
+      type: object
+      required: [advisoryId, package, source]
+      properties:
+        advisoryId:
+          type: string
+        package:
+          $ref: '#/components/schemas/Identity'
+        affected:
+          type: string
+        severity:
+          type: string
+          enum: [LOW, MODERATE, HIGH, CRITICAL]
+        links:
+          type: array
+          items:
+            type: string
+        source:
+          type: string
+          description: Provenance: `osv:<id>` or `offline:<dataset>`. An unreachable feed yields status markers, never invented advisories.
+    RunMeta:
+      type: object
+      description: Provenance block carried by the report JSON.
+      properties:
+        repoUrl:
+          type: string
+        commitSha:
+          type: string
+        baseLockSha:
+          type: string
+        candLockSha:
+          type: string
+        runnerImage:
+          type: string
+        runnerMode:
+          type: string
+          enum: [container, degraded]
+          description: `degraded` means analysis-only: graph, release notes and advisory matching were computed, but no build or test command was executed.
+        commands:
+          type: array
+          items:
+            type: string
+          description: Build/test commands actually executed (empty in analysis-only runs).
+        startedAt:
+          type: string
+          format: date-time
+        artifactUrl:
+          type: string
+        retentionDays:
+          type: integer
+        sampleData:
+          type: boolean
+          description: When true the output is labelled SAMPLE DATA (demo fixtures), not live results.
+    Report:
+      type: object
+      description: The stored report bundle (JSON form of GET /v1/upgrade-runs/{id}/report).
+      properties:
+        meta:
+          $ref: '#/components/schemas/RunMeta'
+        diff:
+          $ref: '#/components/schemas/GraphDiff'
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Finding'
+        buckets:
+          $ref: '#/components/schemas/RiskBuckets'
+        highest:
+          $ref: '#/components/schemas/Severity'
+          description: The run's highest observed severity (the `resultClass`).
+        missing:
+          type: array
+          items:
+            type: string
+          description: Evidence dimensions that could not be evaluated.
+        notes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReleaseNote'
+        advisories:
+          type: array
+          items:
+            $ref: '#/components/schemas/Advisory'
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    ReadyStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
