@@ -1,0 +1,18 @@
+# Root .dockerignore — applies to the dtm-server image (context: product root).
+# Keeps the build context small and secrets/data out of image layers.
+.git
+.github
+.env
+.env.example
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+dtm-server
+frontend/node_modules/
+frontend/dist/
+# deploy/ is kept in the context: the frontend image COPYs
+# deploy/dtm-frontend-nginx.conf (see frontend/Dockerfile).
+docs/
+infrastructure/
+*.md
