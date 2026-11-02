@@ -17,21 +17,23 @@ import (
 )
 
 // RunMeta is the provenance header every report must carry (spec §9).
+// JSON tags use camelCase to match the frontend's typed report shape.
 type RunMeta struct {
-	RepoURL       string
-	CommitSHA     string
-	BaseLockSHA   string
-	CandLockSHA   string
-	RunnerImage   string
-	RunnerMode    string // "container" | "degraded"
-	Commands      []string
-	StartedAt     time.Time
-	ArtifactURL   string
-	RetentionDays int
+	RepoURL       string    `json:"repoUrl"`
+	CommitSHA     string    `json:"commitSha"`
+	BaseLockSHA   string    `json:"baseLockSha"`
+	CandLockSHA   string    `json:"candLockSha"`
+	RunnerImage   string    `json:"runnerImage"`
+	// RunnerMode: "container" | "degraded".
+	RunnerMode string `json:"runnerMode"`
+	Commands   []string `json:"commands"`
+	StartedAt  time.Time `json:"startedAt"`
+	ArtifactURL string   `json:"artifactUrl,omitempty"`
+	RetentionDays int   `json:"retentionDays"`
 	// SampleData, when true, renders a prominent "SAMPLE DATA — demo"
 	// banner on both markdown and JSON output (spec: demo data must be
 	// labelled as sample, not presented as live results).
-	SampleData bool
+	SampleData bool `json:"sampleData,omitempty"`
 }
 
 // RenderOptions controls rendering. SampleData lives on RunMeta so the
@@ -189,14 +191,14 @@ func (r *Report) RenderMarkdown() string {
 // JSON returns the machine-facing report for CI consumption.
 func (r *Report) JSON() ([]byte, error) {
 	type public struct {
-		Meta     RunMeta
-		Diff     *core.GraphDiff
-		Findings []core.Finding
-		Buckets  core.RiskBuckets
-		Highest  string
-		Missing  []string
-		Notes    []core.ReleaseNote
-		Advisories []core.Advisory
+		Meta       RunMeta        `json:"meta"`
+		Diff       *core.GraphDiff `json:"diff"`
+		Findings   []core.Finding  `json:"findings"`
+		Buckets    core.RiskBuckets `json:"buckets"`
+		Highest    string          `json:"highest"`
+		Missing    []string        `json:"missing"`
+		Notes      []core.ReleaseNote `json:"notes"`
+		Advisories []core.Advisory    `json:"advisories"`
 	}
 	p := public{
 		Meta: r.Meta, Diff: r.Diff, Findings: r.Findings,
@@ -214,6 +216,29 @@ func orDash(s string) string {
 	return s
 }
 
-// sampleBanner checks the meta's sample flag via a stable helper so the
-// markdown and JSON renderers stay in lockstep.
-func sampleBanner(r *Report) bool { return r.Meta.SampleData }
+// FromJSON rehydrates a *Report from the public JSON shape produced by
+// JSON() (camelCase, the artifact the API serves and the persistent
+// store rehydrates after a restart). Distinct from encoding/json's
+// default unmarshal of *Report, which would require untagged field
+// names matching the Go identifiers.
+func FromJSON(b []byte) (*Report, error) {
+	type public struct {
+		Meta       RunMeta        `json:"meta"`
+		Diff       *core.GraphDiff `json:"diff"`
+		Findings   []core.Finding  `json:"findings"`
+		Buckets    core.RiskBuckets `json:"buckets"`
+		Highest    string          `json:"highest"`
+		Missing    []string        `json:"missing"`
+		Notes      []core.ReleaseNote `json:"notes"`
+		Advisories []core.Advisory    `json:"advisories"`
+	}
+	var p public
+	if err := json.Unmarshal(b, &p); err != nil {
+		return nil, err
+	}
+	return &Report{
+		Meta: p.Meta, Diff: p.Diff, Findings: p.Findings,
+		Buckets: p.Buckets, Highest: p.Highest, Missing: p.Missing,
+		Notes: p.Notes, Advisories: p.Advisories,
+	}, nil
+}
