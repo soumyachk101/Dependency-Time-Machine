@@ -54,6 +54,7 @@ func main() {
 
 	// Data layer: open the store only when a non-memory driver is
 	// configured; the in-memory run store in the API is always available.
+	var runStore *store.Store
 	if cfg.DataDriver != config.MemoryDriver {
 		dsn := cfg.SQLitePath
 		if cfg.DataDriver == config.PostgresDriver {
@@ -69,6 +70,7 @@ func main() {
 			os.Exit(2)
 		}
 		defer st.Close()
+		runStore = st
 		logger.Info("boot: store open", "driver", cfg.DataDriver)
 	}
 
