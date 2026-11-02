@@ -24,6 +24,10 @@ type StoredRun struct {
 	Diff          *core.GraphDiff
 	AdvisoryFeed  string
 	JSONPayload   []byte // the machine report, pre-rendered for GET /report
+	// ArtifactRef is the raw-artifact reference (URI + retention label)
+	// for this run's machine JSON / report bundle. Empty until the
+	// artifact store path populates it; persisted alongside the run row.
+	ArtifactRef string
 }
 
 // ---- RunSummary adapter so the ci package can shape comments without
@@ -73,6 +77,15 @@ func (s RunSummary) TopFindings() []core.Finding {
 // supplied at construction by the caller that owns routing.
 func (s RunSummary) ReportURL() string { return s.reportURL }
 
+// RunStore is the handler-facing run-persistence surface. Both the
+// in-memory and the persistent (SQLite/Postgres) implementations satisfy
+// it, so the API is agnostic to which backing store is active.
+type RunStore interface {
+	Save(run *StoredRun) error
+	Get(id string) (*StoredRun, bool)
+	List(limit int) []*StoredRun
+}
+
 // InMemoryRunStore is the MVP persistence: a mutex-guarded map with a
 // bounded, deterministic listing. The SQLite-backed variant in store.go
 // is what production uses; this one exists so the API is fully usable
@@ -102,6 +115,9 @@ func (s *InMemoryRunStore) Get(id string) (*StoredRun, bool) {
 	r, ok := s.runs[id]
 	return r, ok
 }
+
+// compile-time check: both backends satisfy the handler-facing surface.
+var _ RunStore = (*InMemoryRunStore)(nil)
 
 // List returns up to limit runs, most-recently saved first. Ordering is
 // by insertion sequence, not wall-clock, so output is deterministic for
