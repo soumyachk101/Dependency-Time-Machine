@@ -30,6 +30,20 @@ type Config struct {
 	LogLevel      string
 	StaticDir     string
 
+	// Operator auth: non-nil means Bearer-token auth is ON for all API
+	// routes; nil/empty means dev-open mode (every request logs a WARN).
+	APIToken *string
+	// CORSOrigin, when set, is echoed into Access-Control-Allow-Origin on
+	// API responses; empty means the same-origin dev default (no CORS
+	// header emitted, i.e. no `*`).
+	CORSOrigin string
+
+	// Per-route-class rate limits (token bucket per client IP). A class
+	// whose RPS is 0 falls back to the legacy global knobs so existing
+	// deployments keep their tuned budget.
+	RateLimitClasses RateClasses
+
+	// Legacy global knobs, used as the per-class fallback above.
 	RateLimitRPS   float64
 	RateLimitBurst int
 
@@ -49,6 +63,45 @@ type Config struct {
 	GitHubAppID   *string
 	GitHubKeyFile *string
 }
+
+// RateClasses holds the per-route-class limiter budgets (token bucket per
+// client IP). Zero values fall back to the legacy global knobs
+// (DTM_RATE_LIMIT_RPS / _BURST), so existing deployments keep their tuned
+// budget when the class-specific env is unset.
+//
+// Class semantics (see docs/SCALING.md for the documented defaults):
+//   - Analysis: POST /v1/upgrade-runs (pipeline runs; highest budget).
+//   - Webhooks: POST /v1/webhooks/github (medium budget).
+//   - Reads:    GET /v1/upgrade-runs/{id}[...], report/graph-diff fetches
+//     (high budget). /healthz and /readyz are unthrottled — the root
+//     Dockerfile HEALTHCHECK probes /healthz, so it must never 429.
+//   - Repos:    POST /v1/repositories/connect, /v1/snapshots, /v1/policies.
+type RateClasses struct {
+	Analysis RateLimit
+	Webhooks RateLimit
+	Reads    RateLimit
+	Repos    RateLimit
+}
+
+// RateLimit is one token-bucket budget. RPS of 0 means "fall back to the
+// legacy global budget" (not "disable").
+type RateLimit struct {
+	RPS   float64
+	Burst int
+}
+
+// Class names, matching the DTM_RATE_LIMIT_<CLASS>_RPS env knobs:
+//   - ANALYSIS: highest budget — a single upgrade run can be a long
+//     poll of the pipeline.
+//   - WEBHOOKS: medium — GitHub posts webhooks at PR/commit cadence.
+//   - READS: high — polling, graph-diff and report fetches.
+//   - REPOS: medium-low — connect + policy writes.
+const (
+	AnalysisRateClass = "ANALYSIS"
+	WebhooksRateClass = "WEBHOOKS"
+	ReadsRateClass    = "READS"
+	ReposRateClass    = "REPOS"
+)
 
 // Load reads the environment (via GetEnv) and applies defaults +
 // validation. It returns an error on any invalid value so the process
@@ -73,6 +126,33 @@ func Load(getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 	c.RateLimitBurst = burst
+
+	// Per-route-class budgets; a zero RPS means "fall back to the legacy
+	// global knobs above" so existing deployments are unaffected.
+	classRL := func(prefix string, defRPS float64, defBurst int) (RateLimit, error) {
+		r, err := parseFloatDef(getenv(prefix+"_RPS"), defRPS)
+		if err != nil {
+			return RateLimit{}, err
+		}
+		b, err := parseIntDef(getenv(prefix+"_BURST"), defBurst)
+		if err != nil {
+			return RateLimit{}, err
+		}
+		return RateLimit{RPS: r, Burst: b}, nil
+	}
+	var clErr error
+	if c.RateLimitClasses.Analysis, clErr = classRL("DTM_RATE_LIMIT_ANALYSIS", 20, 40); clErr != nil {
+		return nil, clErr
+	}
+	if c.RateLimitClasses.Webhooks, clErr = classRL("DTM_RATE_LIMIT_WEBHOOKS", 10, 20); clErr != nil {
+		return nil, clErr
+	}
+	if c.RateLimitClasses.Reads, clErr = classRL("DTM_RATE_LIMIT_READS", 50, 100); clErr != nil {
+		return nil, clErr
+	}
+	if c.RateLimitClasses.Repos, clErr = classRL("DTM_RATE_LIMIT_REPOS", 5, 10); clErr != nil {
+		return nil, clErr
+	}
 
 	c.RunnerMode = def(getenv("DTM_RUNNER_MODE"), "auto")
 	c.RunnerImage = def(getenv("DTM_DOCKER_IMAGE"), "ghcr.io/ensembyte/dtm-runner:1.0.0")
@@ -100,6 +180,12 @@ func Load(getenv func(string) string) (*Config, error) {
 	if v := getenv("DTM_GITHUB_APP_PRIVATE_KEY_FILE"); v != "" {
 		c.GitHubKeyFile = &v
 	}
+	// Operator auth: empty = dev-open mode (the API logs a WARN per
+	// unauthenticated request rather than rejecting). See docs/SCALING.md.
+	if v := getenv("DTM_API_TOKEN"); v != "" {
+		c.APIToken = &v
+	}
+	c.CORSOrigin = getenv("DTM_CORS_ORIGIN")
 
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -124,10 +210,31 @@ func (c *Config) validate() error {
 	if c.RateLimitRPS < 0 {
 		return fmt.Errorf("config: DTM_RATE_LIMIT_RPS must be >= 0")
 	}
+	if c.APIToken != nil && len(*c.APIToken) < 16 {
+		return fmt.Errorf("config: DTM_API_TOKEN must be at least 16 characters")
+	}
 	if c.HTTPAddr == "" {
 		return fmt.Errorf("config: DTM_HTTP_ADDR must be non-empty")
 	}
 	return nil
+}
+
+// ClassBudget returns the effective RPS/burst for one route-class
+// limiter: the class-specific value when its RPS is > 0, else the legacy
+// global knobs (DTM_RATE_LIMIT_RPS / _BURST) so a class explicitly set
+// to 0 falls back rather than disabling limiting.
+func (c *Config) ClassBudget(class RateLimit) RateLimit {
+	if class.RPS > 0 {
+		if class.Burst < 1 {
+			class.Burst = 1
+		}
+		return class
+	}
+	fallback := RateLimit{RPS: c.RateLimitRPS, Burst: c.RateLimitBurst}
+	if fallback.Burst < 1 {
+		fallback.Burst = 1
+	}
+	return fallback
 }
 
 // ---- env accessors + typed parsers ----------------------------------------
