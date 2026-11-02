@@ -1,0 +1,114 @@
+# Dependency Time Machine (DTM)
+
+Dependency Time Machine evaluates proposed dependency upgrades before they
+merge. It compares base vs candidate dependency graphs, inspects release notes
+and security advisories, and produces an evidence-backed risk report plus a CI
+check. It is not a package manager and not a Dependabot/Renovate replacement:
+those tools propose updates; DTM tests the impact.
+
+## Execution model (read this before interpreting results)
+
+- Container-isolated runner execution (`DTM_RUNNER_MODE=container`) is the
+  documented path for actually running builds/tests.
+- Safe-degraded mode (no container runtime available) performs
+  manifest/graph-level analysis only: dependency graph diff, release-note
+  signals, advisory matching. No build or test command is executed, and no
+  report claims builds/tests ran. Treat `executed: false` and
+  `runnerMode: "degraded"` as "analysis only".
+- The API pipeline endpoint always stores runs with `runnerMode: "degraded"`,
+  `executed: false`; runs that did execute are ingested via
+  `POST /v1/cli-runs` from the CLI/runner.
+
+## Endpoints (Go control plane, JSON)
+
+Base URL in local dev: http://127.0.0.1:8080 (env DTM_HTTP_ADDR).
+
+- POST /v1/upgrade-runs — run a base-vs-candidate upgrade evaluation
+  (pipeline: graph diff, release notes, advisories; stores the run;
+  201 created, 200 on idempotent replay, 409 on key/content conflict,
+  422 on rejected content). Body capped at 2 MiB.
+- GET /v1/upgrade-runs/{id} — fetch a stored run summary; 404 when absent.
+- GET /v1/upgrade-runs/{id}/graph-diff — the run's dependency-graph diff;
+  404 when the run or its diff is absent.
+- GET /v1/upgrade-runs/{id}/report — the run's report; JSON by default,
+  Markdown when the Accept header contains "markdown"; 404 when absent.
+- POST /v1/repositories/connect — register an owner/repo the control plane
+  manages (provider defaults to github); returns the project_id.
+- POST /v1/snapshots — record one commit's manifest+lockfile contents;
+  detects supported ecosystems; 422 when no supported pair is found.
+- POST /v1/policies — set a project's block/warn result-class thresholds
+  (severities: confirmed_failure, strong_warning, review_suggested,
+  no_issue_observed).
+- POST /v1/webhooks/github — GitHub event intake; HMAC-SHA256 verified
+  (X-Hub-Signature-256) plus X-Hub-Delivery nonce replay guard
+  (15-minute in-process window); 202 when accepted, 401 when no secret is
+  configured or the signature is invalid, 403 on replayed nonce.
+- POST /v1/cli-runs — intake a completed run from the dtm CLI/runner;
+  persists it and posts a GitHub check-run when a token is configured
+  (honest `posting` field: skipped_no_token | posted | failed: ...).
+- GET /healthz — liveness; unauthenticated, unthrottled; 200 {"status":"ok"}.
+- GET /readyz — readiness; unauthenticated, unthrottled; 200 {"status":"ready"}
+  or 503 {"status":"not_ready"} until the data store is reachable.
+
+## Error envelope
+
+Every non-2xx response is exactly:
+
+    {"error": {"code": "<err_code>", "message": "<human detail>"}}
+
+Error codes: err_unauthorized (401), err_forbidden (403, webhook replay),
+err_rate_limited (429, with Retry-After: 1), err_invalid_request (400),
+err_payload_too_large (413, over the 2 MiB body cap), err_not_found (404),
+err_conflict (409, idempotency-key content mismatch), err_internal (500).
+
+## Authentication
+
+- Operator bearer: when DTM_API_TOKEN is set (>= 16 chars), every /v1/*
+  route requires a matching `Authorization: Bearer <token>` header
+  (constant-time compare); missing/wrong token is 401. Unset means
+  dev-open mode: requests are accepted and a WARN is logged instead.
+- Webhook HMAC: /v1/webhooks/github only; per-recipient secret
+  (DTM_GITHUB_WEBHOOK_SECRET), closed default — no secret, no webhook.
+
+## Rate limits (per client IP, per route class)
+
+- analysis: POST /v1/upgrade-runs — default 20 rps / burst 40.
+- webhooks: POST /v1/webhooks/github — default 10 / 20.
+- reads: GET /v1/upgrade-runs/{id}[...], report and graph-diff fetches —
+  default 50 / 100.
+- repos: POST /v1/repositories/connect, /v1/snapshots, /v1/policies,
+  /v1/cli-runs — default 5 / 10.
+
+Env knobs: DTM_RATE_LIMIT_<ANALYSIS|WEBHOOKS|READS|REPOS>_RPS/_BURST. A class
+left at 0 falls back to the legacy global DTM_RATE_LIMIT_RPS/_BURST (10/20).
+GET /healthz and /readyz are never throttled (the container HEALTHCHECK
+probes /healthz; it must not 429). Note: limiter counters are per-process;
+N replicas get N times the configured budget (see docs/SCALING.md).
+
+## Configuration (selected env vars)
+
+DTM_API_TOKEN (operator auth; off when unset), DTM_CORS_ORIGIN (echoed into
+Access-Control-Allow-Origin when set; empty = no CORS header, never `*`),
+DTM_DATA_DRIVER (sqlite default | postgres | memory), DTM_HTTP_ADDR
+(127.0.0.1:8080), DTM_RUNNER_MODE (auto|container|degraded),
+DTM_GITHUB_WEBHOOK_SECRET, DTM_ARTIFACT_RETENTION_DAYS (default 14).
+
+## Execution guarantees and known limits
+
+- Container-isolated execution is the documented path for builds/tests;
+  safe-degraded mode is analysis-only (never claims execution). Details:
+  docs/EXECUTION-ISOLATION-LIMITS.md.
+- Webhook replay nonces and rate-limit counters are per-process
+  (best-effort; a shared store is needed across replicas): docs/SCALING.md.
+- GitHub App installation-token exchange is a documented limitation in this
+  build; check-run posting works only with a direct operator token:
+  docs/KNOWN-LIMITATIONS.md.
+
+## Further reading
+
+- docs/API.md — endpoint reference, error-code table, rate-limit class table.
+- docs/SCALING.md — statelessness, replica caveats, data store, run persistence.
+- docs/EXECUTION-ISOLATION-LIMITS.md — what "degraded mode" and container mode
+  each guarantee (and do not guarantee).
+- docs/KNOWN-LIMITATIONS.md — explicit gaps and honest limitations.
+- docs/openapi.yaml — machine-readable OpenAPI 3.0 spec of every route.
