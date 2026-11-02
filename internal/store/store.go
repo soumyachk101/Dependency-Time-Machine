@@ -19,7 +19,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	_ "github.com/modernc.org/sqlite"
+	_ "modernc.org/sqlite"
 )
 
 // Driver names.
@@ -87,11 +87,12 @@ func lastPathSeg(p string) string {
 	return p
 }
 
-// Migrate applies the schema for both backends (SQL is portable; column
-// types chosen to work under SQLite and Postgres alike).
+// Migrate applies the schema for both backends. Each statement is
+// executed individually because the pure-Go SQLite driver does not
+// reliably execute multi-statement batches in one Exec call.
 func (s *Store) Migrate(ctx context.Context) error {
-	_, err := s.DB.ExecContext(ctx, `
-CREATE TABLE IF NOT EXISTS projects (
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   provider TEXT NOT NULL DEFAULT 'local',
@@ -100,9 +101,8 @@ CREATE TABLE IF NOT EXISTS projects (
   default_branch TEXT NOT NULL DEFAULT 'main',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS snapshots (
+)`,
+		`CREATE TABLE IF NOT EXISTS snapshots (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   commit_sha TEXT NOT NULL,
@@ -111,10 +111,9 @@ CREATE TABLE IF NOT EXISTS snapshots (
   lockfile_sha256 TEXT NOT NULL,
   ecosystem TEXT NOT NULL,
   created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_snapshots_project ON snapshots(project_id, commit_sha);
-
-CREATE TABLE IF NOT EXISTS upgrade_runs (
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshots_project ON snapshots(project_id, commit_sha)`,
+		`CREATE TABLE IF NOT EXISTS upgrade_runs (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   base_snapshot_id TEXT NOT NULL,
@@ -125,10 +124,9 @@ CREATE TABLE IF NOT EXISTS upgrade_runs (
   started_at TEXT NOT NULL,
   finished_at TEXT NOT NULL DEFAULT '',
   result_class TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_runs_project ON upgrade_runs(project_id, started_at);
-
-CREATE TABLE IF NOT EXISTS findings (
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_runs_project ON upgrade_runs(project_id, started_at)`,
+		`CREATE TABLE IF NOT EXISTS findings (
   id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL,
   dimension TEXT NOT NULL,
@@ -137,22 +135,61 @@ CREATE TABLE IF NOT EXISTS findings (
   summary TEXT NOT NULL,
   confidence REAL NOT NULL,
   evidence_json TEXT NOT NULL DEFAULT '[]'
-);
-CREATE INDEX IF NOT EXISTS idx_findings_run ON findings(run_id);
-
-CREATE TABLE IF NOT EXISTS policies (
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_findings_run ON findings(run_id)`,
+		`CREATE TABLE IF NOT EXISTS policies (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
   block_on TEXT NOT NULL,
   warn_on TEXT NOT NULL,
   updated_at TEXT NOT NULL
-);
-`
-	)
-	return err
+)`,
+		// Finished-run persistence (wired to the API since the run-store
+		// rework): the durable twin of api.InMemoryRunStore. Both drivers
+		// share this DDL; Postgres accepts it as-is (INTEGER/TEXT are
+		// valid Postgres types). Executing it here keeps a long-lived
+		// Postgres deployment self-healing without a migration file.
+		`CREATE TABLE IF NOT EXISTS api_runs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  repo_url TEXT NOT NULL DEFAULT '',
+  commit_sha TEXT NOT NULL DEFAULT '',
+  runner_mode TEXT NOT NULL DEFAULT '',
+  executed INTEGER NOT NULL DEFAULT 0,
+  result_class TEXT NOT NULL DEFAULT '',
+  advisory_feed TEXT NOT NULL DEFAULT '',
+  report_json TEXT NOT NULL DEFAULT '',
+  diff_json TEXT NOT NULL DEFAULT '',
+  artifact_ref TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_runs_project ON api_runs(project_id, created_at)`,
+	}
+	for _, st := range stmts {
+		if _, err := s.DB.ExecContext(ctx, st); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // nowISO is the deterministic-ish timestamp helper (UTC, RFC3339).
 func nowISO() string { return time.Now().UTC().Format(time.RFC3339) }
 
-var _ = sql.ErrNoRows // keep the database/sql import alive if query helpers move
+// Ping reports whether the underlying database is reachable (used by
+// /readyz).
+func (s *Store) Ping() error {
+	if s.DB == nil {
+		return nil
+	}
+	return s.DB.Ping()
+}
+
+// Close releases the underlying connection pool.
+func (s *Store) Close() error {
+	if s.DB == nil {
+		return nil
+	}
+	return s.DB.Close()
+}
+
