@@ -5,9 +5,36 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Dependency Time Machine — reproducible pre-merge dependency upgrade evaluation."
+      content="Dependency Time Machine — reproducible pre-merge dependency upgrade evaluation: isolated base/candidate builds, graph diff, release-note and security-advisory evidence, and upgrade-risk reporting for CI."
     />
-    <title>Dependency Time Machine</title>
+    <meta name="application-name" content="Dependency Time Machine" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>Dependency Time Machine — upgrade risk &amp; compatibility simulation</title>
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Dependency Time Machine — upgrade risk &amp; compatibility simulation" />
+    <meta
+      property="og:description"
+      content="Reproducible, evidence-grounded dependency upgrade analysis with isolated execution, regression classification and CI integration."
+    />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Dependency Time Machine",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Web, Linux, macOS, Windows",
+        "description": "Reproducible pre-merge dependency upgrade evaluation: isolated base/candidate builds, dependency-graph diff, release-note and security-advisory evidence, and upgrade-risk reporting for CI.",
+        "offers": {
+          "@type": "Offer",
+          "priceSpecification": [
+            { "@type": "PriceSpecification", "name": "Free OSS", "price": "0", "priceCurrency": "USD" },
+            { "@type": "PriceSpecification", "name": "Developer", "price": "15", "priceCurrency": "USD", "unitText": "month" },
+            { "@type": "PriceSpecification", "name": "Team", "price": "49", "priceCurrency": "USD", "unitText": "month" }
+          ],
+          "description": "Free OSS core; Developer $15–$29/month; Team $49–$199/month; Enterprise self-hosted runners custom."
+        }
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
