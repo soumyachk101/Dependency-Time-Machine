@@ -127,6 +127,7 @@ func Diff(base, cand *core.Graph) *core.GraphDiff {
 	})
 
 	reachableChanged := 0
+	var entries []core.DiffEntry
 	for _, k := range seeds {
 		s := merged[k]
 		var e core.DiffEntry
@@ -149,12 +150,14 @@ func Diff(base, cand *core.Graph) *core.GraphDiff {
 			e.Category = core.DiffRemoved
 		default:
 			verB, verC := e.BaseVersion, e.CandVersion
-			// Primary classification is by version delta.
+			// Primary classification is by version delta. cmp is
+			// compareVersions(base, cand): +1 means base is NEWER, so the
+			// move is a downgrade.
 			cmp := compareVersions(verB, verC, e.Identity.Ecosystem)
 			switch {
-			case cmp > 0:
-				e.Category = core.DiffUpgraded
 			case cmp < 0:
+				e.Category = core.DiffUpgraded
+			case cmp > 0:
 				e.Category = core.DiffDowngraded
 			}
 			// Secondary flags: a version-unchanged package may still
