@@ -44,6 +44,10 @@ type Result struct {
 	Notes      []core.ReleaseNote
 	Advisories []core.Advisory
 	Diff       *core.GraphDiff
+	// Base/Candidate are the full resolved graphs, exposed so the UI's
+	// dependency-graph view can render the actual tree, not just the diff.
+	Base      *core.Graph
+	Candidate *core.Graph
 }
 
 // Run executes the pipeline. Steps:
@@ -126,5 +130,9 @@ func Run(ctx context.Context, base, cand Revision, opts Options) (*Result, error
 		AdvisoryStatus: feedStatus,
 	}), notes, advisories)
 
-	return &Result{Report: rep, Advisory: feedStatus, Notes: notes, Advisories: advisories, Diff: diff}, nil
+	return &Result{
+		Report: rep, Advisory: feedStatus, Notes: notes,
+		Advisories: advisories, Diff: diff,
+		Base: bg, Candidate: cg,
+	}, nil
 }
