@@ -103,13 +103,41 @@ func main() {
 	osv := advisory.NewOSVClient(cfg.OSVEndpoint)
 	notes := relnotes.NewClient()
 
+	// Run persistence: when a durable store (SQLite/Postgres) is open,
+	// the API records finished runs into it so they survive a restart;
+	// otherwise (DTM_DATA_DRIVER=memory) the in-memory twin is used and
+	// run records are process-local.
+	var runs api.RunStore
+	if runStore != nil {
+		runs = store.NewPersistentRunStore(runStore)
+	}
+
+	// Per-route-class rate limiters; a class left at RPS 0 falls back to
+	// the legacy global DTM_RATE_LIMIT_RPS/_BURST budget.
+	limits := map[string]*api.Limiter{
+		api.ClassAnalysis: api.NewLimiter(cfg.ClassBudget(cfg.RateLimitClasses.Analysis).RPS, cfg.ClassBudget(cfg.RateLimitClasses.Analysis).Burst),
+		api.ClassWebhooks: api.NewLimiter(cfg.ClassBudget(cfg.RateLimitClasses.Webhooks).RPS, cfg.ClassBudget(cfg.RateLimitClasses.Webhooks).Burst),
+		api.ClassReads:    api.NewLimiter(cfg.ClassBudget(cfg.RateLimitClasses.Reads).RPS, cfg.ClassBudget(cfg.RateLimitClasses.Reads).Burst),
+		api.ClassRepos:    api.NewLimiter(cfg.ClassBudget(cfg.RateLimitClasses.Repos).RPS, cfg.ClassBudget(cfg.RateLimitClasses.Repos).Burst),
+	}
+
 	srv := api.New(api.Config{
-		RateLimitRPS:   cfg.RateLimitRPS,
-		RateLimitBurst: cfg.RateLimitBurst,
-		WebhookSecret:  cfg.WebhookSecret,
-		GitHubToken:    cfg.GitHubKeyFile, // presence flag; CI layer interprets
-		BaseURL:        cfg.StaticDir,
-	}, gh, osv, notes, logger)
+		APIToken:      cfg.APIToken,
+		CORSOrigin:    cfg.CORSOrigin,
+		Limits:        limits,
+		WebhookSecret: cfg.WebhookSecret,
+		GitHubToken:   &ghToken,
+		BaseURL:       cfg.StaticDir,
+	}, gh, osv, notes, logger, runs)
+
+	// /readyz readiness: the durable store must be reachable; in memory
+	// mode there is nothing to probe, so the server is always ready.
+	if runStore != nil {
+		srv.Ready = func() bool {
+			_ = runStore.Ping()
+			return true
+		}
+	}
 
 	httpSrv := &http.Server{
 		Addr:         cfg.HTTPAddr,
