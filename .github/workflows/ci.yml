@@ -42,6 +42,15 @@ jobs:
         working-directory: .
         run: DTM_DISABLE_DOCKER_PROBE=1 go test ./...
 
+      # govulncheck scans the module's dependency graph against the Go
+      # vulnerability database; a newly-introduced known-vulnerable
+      # dependency fails this job.
+      - name: govulncheck (Go dependency vulnerabilities)
+        working-directory: .
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
   frontend:
     name: Frontend (typecheck + build)
     runs-on: ubuntu-latest
@@ -62,6 +71,29 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+      # npm audit scans the tree the job just installed (the `npm install`
+      # step above) against the advisory database; --audit-level=high fails
+      # on any high/critical finding.
+      - name: npm audit (JS dependency vulnerabilities)
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
       # NOTE: `npm run lint` is not run here — package.json defines the
       # script but no ESLint config or typescript-eslint deps are
       # committed, so it would fail. Add config + deps to re-enable.
+
+  # gitleaks scans the full history for committed secrets. Runs in its own
+  # lightweight job so a secret finding does not block the component jobs.
+  secret-scan:
+    name: secret scanning (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
