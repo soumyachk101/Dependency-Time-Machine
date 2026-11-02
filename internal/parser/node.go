@@ -48,7 +48,7 @@ func ParseNode(manifestJSON, lockfile []byte, lockName string) (*GraphOut, error
 	case strings.HasSuffix(lockName, "pnpm-lock.yaml") ||
 		(strings.HasPrefix(string(lockfile), "lockfileVersion:") && bytes.Contains(lockfile, []byte("packages"))):
 		return parsePnpm(manifestJSON, lockfile)
-	case bytes.TrimSpace(lockfile)[0:1] == "{":
+	case bytes.TrimSpace(lockfile)[0] == '{':
 		return parseNPMLock(manifestJSON, lockfile)
 	}
 	return nil, ErrUnsupported
@@ -56,7 +56,7 @@ func ParseNode(manifestJSON, lockfile []byte, lockName string) (*GraphOut, error
 
 // ---- package.json ----------------------------------------------------------
 
-type npmManifest struct {
+type npmManifestDoc struct {
 	Dependencies    map[string]string `json:"dependencies"`
 	DevDependencies map[string]string `json:"devDependencies"`
 	PeerDependencies map[string]string `json:"peerDependencies"`
@@ -65,10 +65,10 @@ type npmManifest struct {
 	} `json:"engines"`
 }
 
-func directFromManifest(manifestJSON []byte) (map[string]bool, string) {
-	var m npmManifest
+func directFromManifest(manifestJSON []byte) (map[string]bool, error) {
+	var m npmManifestDoc
 	if err := json.Unmarshal(manifestJSON, &m); err != nil {
-		return map[string]bool{}, ""
+		return nil, fmt.Errorf("parser: package.json: %w", err)
 	}
 	direct := map[string]bool{}
 	for n := range m.Dependencies {
@@ -80,7 +80,7 @@ func directFromManifest(manifestJSON []byte) (map[string]bool, string) {
 	for n := range m.PeerDependencies {
 		direct[n] = true
 	}
-	return direct, m.Engines.Node
+	return direct, nil
 }
 
 // ---- npm package-lock.json -------------------------------------------------
@@ -89,10 +89,25 @@ func directFromManifest(manifestJSON []byte) (map[string]bool, string) {
 // integrity, dependencies, ...}. v1 shape: dependencies tree. We support
 // v2/v3 (the modern default) and v1 best-effort.
 type npmLock struct {
-	Name          string
-	Version       int
-	Packages      map[string]npmLockPkg `json:"packages"`
-	Dependencies  map[string]npmLockPkg `json:"dependencies"` // v1
+	Name       string `json:"name"`
+	Version    int    `json:"lockfileVersion"`
+	Packages   map[string]npmLockPkg `json:"packages"` // v2/v3
+	// Dependencies is only populated in v1 lockfiles (the nested tree).
+	Dependencies map[string]npmV1Pkg `json:"dependencies"`
+}
+
+// npmV1Pkg is the v1 nested lockfile package shape: its own dependencies
+// are again full v1 package objects, not name->version pairs.
+type npmV1Pkg struct {
+	Version      string        `json:"version"`
+	Integrity    string        `json:"integrity"`
+	Resolved     string        `json:"resolved"`
+	Dependencies map[string]npmV1Pkg `json:"dependencies"`
+	Dev          bool          `json:"dev"`
+	Optional     bool          `json:"optional"`
+	Engines      struct {
+		Node string `json:"node"`
+	} `json:"engines"`
 }
 
 type npmLockPkg struct {
@@ -108,7 +123,10 @@ type npmLockPkg struct {
 }
 
 func parseNPMLock(manifestJSON, lockfile []byte) (*GraphOut, error) {
-	direct, engine := directFromManifest(manifestJSON)
+	direct, err := directFromManifest(manifestJSON)
+	if err != nil {
+		return nil, err
+	}
 	var lock npmLock
 	if err := json.Unmarshal(lockfile, &lock); err != nil {
 		return nil, fmt.Errorf("parser: package-lock.json: %w", err)
@@ -135,32 +153,24 @@ func parseNPMLock(manifestJSON, lockfile []byte) (*GraphOut, error) {
 				RuntimeReq: p.Engines.Node,
 				DependsOn:  keys(p.Dependencies),
 			})
-			fromVer := "root"
-			if path == "" {
-				fromVer = "root"
-			}
-			for dep := range p.Dependencies {
-				// Best-effort: resolved version of the dep is looked up below.
-				_ = dep
-			}
-			out.Edges = append(out.Edges, buildEdges(path, fromVer, p)...)
+			out.Edges = append(out.Edges, buildEdges(path, p)...)
 		}
 	} else {
 		// v1: nested dependencies — walk recursively.
-		var walk func(name, ver string, deps map[string]npmLockPkg, depth int)
-		walk = func(name, ver string, deps map[string]npmLockPkg, depth int) {
+		var walk func(name, ver string, deps map[string]npmV1Pkg, depth int)
+		walk = func(name, ver string, deps map[string]npmV1Pkg, depth int) {
 			for dn, dp := range deps {
 				verS := dp.Version
 				if verS == "" {
 					verS = "0.0.0"
 				}
 				out.Packages = append(out.Packages, PackageOut{
-					Name:       dn,
-					Version:    verS,
-					Integrity:  dp.Integrity,
-					Direct:     direct[dn] && depth == 0,
-					Source:     "registry",
-					DependsOn:  keys(dp.Dependencies),
+					Name:      dn,
+					Version:   verS,
+					Integrity: dp.Integrity,
+					Direct:    direct[dn] && depth == 0,
+					Source:    "registry",
+					DependsOn: keysMap(dp.Dependencies),
 				})
 				out.Edges = append(out.Edges, EdgeOut{
 					From: name, FromVer: ver, To: dn, ToVer: verS, Direct: depth == 0 && direct[dn],
@@ -172,26 +182,26 @@ func parseNPMLock(manifestJSON, lockfile []byte) (*GraphOut, error) {
 		}
 		walk("(root)", "0.0.0", lock.Dependencies, 0)
 	}
-	_ = engine
 	return dedupeGraph(out), nil
 }
 
 // buildEdges emits edges from one v2/v3 lock entry to its dependencies.
-func buildEdges(path, fromVer string, p npmLockPkg) []EdgeOut {
+func buildEdges(path string, p npmLockPkg) []EdgeOut {
 	if len(p.Dependencies) == 0 {
 		return nil
 	}
 	// In v2/v3, the path "node_modules/a" depends on packages that live at
-	// "node_modules/a/node_modules/b" (nested) or "node_modules/b" (hoisted).
-	// We emit edges by name only; the resolver's graph builder joins on
-	// name, which is correct for hoisted layouts.
+	// "node_modules/a/node_modules/b" (nested) or "node_modules/b"
+	// (hoisted). We emit edges by name; the resolver joins on name, which
+	// is correct for hoisted layouts. The edge's From version is this
+	// entry's own resolved version.
 	fromName := strings.TrimPrefix(path, "node_modules/")
 	if fromName == "" {
 		fromName = "(root)"
 	}
 	edges := make([]EdgeOut, 0, len(p.Dependencies))
 	for dep, ver := range p.Dependencies {
-		edges = append(edges, EdgeOut{From: fromName, FromVer: fromVer, To: dep, ToVer: ver})
+		edges = append(edges, EdgeOut{From: fromName, FromVer: p.Version, To: dep, ToVer: ver})
 	}
 	return edges
 }
@@ -226,7 +236,10 @@ type pnpmPkg struct {
 }
 
 func parsePnpm(manifestJSON, lockfile []byte) (*GraphOut, error) {
-	direct, _ := directFromManifest(manifestJSON)
+	direct, err := directFromManifest(manifestJSON)
+	if err != nil {
+		return nil, err
+	}
 	var lock pnpmLock
 	if err := yaml.Unmarshal(lockfile, &lock); err != nil {
 		return nil, fmt.Errorf("parser: pnpm-lock.yaml: %w", err)
@@ -277,6 +290,18 @@ func splitPnpmPath(path string) (string, string) {
 // ---- shared helpers ----------------------------------------------------------
 
 func keys(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// keysMap extracts the keys of a v1 nested-deps map, for DependsOn.
+func keysMap(m map[string]npmV1Pkg) []string {
 	if len(m) == 0 {
 		return nil
 	}
