@@ -182,3 +182,15 @@ export function getGraphDiff(id: string) {
 export function getReport(id: string) {
   return request<Report>(`/v1/upgrade-runs/${id}/report`);
 }
+
+// Webhook-intake test for the Settings screen. Sends a synthetic event to
+// POST /v1/webhooks/github. The server verifies its HMAC only when a
+// secret is configured, so an honest 401 is the expected result until the
+// operator arms DTM_GITHUB_WEBHOOK_SECRET — the UI surfaces that as an
+// error state, not a fabricated success.
+export function postWebhookTest(payload: { action: string; number: number }) {
+  return request<{ event?: unknown; note: string }>("/v1/webhooks/github", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
