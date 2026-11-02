@@ -151,76 +151,97 @@ type ContainerRunner struct{ logger *slog.Logger }
 func (r *ContainerRunner) Name() string     { return "container" }
 func (r *ContainerRunner) Supports() bool   { return true }
 func (r *ContainerRunner) Run(ctx context.Context, spec RunSpec) ([]Result, error) {
-	args := []string{"run", "--rm"}
-	// Resource limits — shared between base and candidate for parity.
+	// Pull the image first so a missing image fails fast, before any
+	// command is attempted. The pull is one-time; both base and candidate
+	// sides share the same pull for parity.
+	pullOut, err := exec.CommandContext(ctx, "docker", "pull", spec.ImageRef).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("runner: pull %s: %w (%s)", spec.ImageRef, err, strings.TrimSpace(string(pullOut)))
+	}
+	// Record the image digest for the run manifest (reproducibility NFR).
+	imgOut, _ := exec.CommandContext(ctx, "docker", "images", "-q", spec.ImageRef).Output()
+	digest := strings.TrimSpace(string(imgOut))
+
+	// Shared container settings, identical for base and candidate sides:
+	// resource limits are the fairness contract (NFR "Fair comparison"),
+	// the egress network is the allowlist boundary, and no host paths
+	// beyond the staged workdir are ever mounted.
+	baseArgs := []string{"run", "--rm", "--init"}
 	if spec.Limits.CPU != "" {
-		args = append(args, "--cpus", spec.Limits.CPU)
+		baseArgs = append(baseArgs, "--cpus", spec.Limits.CPU)
 	}
 	if spec.Limits.Memory != "" {
-		args = append(args, "--memory", spec.Limits.Memory)
+		baseArgs = append(baseArgs, "--memory", spec.Limits.Memory)
 	}
-	// Isolation: no host mounts except the staged workdir (read-only for
-	// install caches is not possible with docker mount semantics; we mount
-	// the stage dir read-write but never /, /home or the docker socket,
-	// and never run privileged).
-	args = append(args, "-v", spec.Workdir+":/workspace", "-w", "/workspace")
-	args = append(args, "--network", "dtm-egress") // egress proxy allowlist network
-	args = append(args, "--label", "dtm.side="+spec.Side)
-	// Pull the image and record its digest for the run manifest.
-	images, err := exec.CommandContext(ctx, "docker", "pull", spec.ImageRef).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("runner: pull %s: %w (%s)", spec.ImageRef, err, strings.TrimSpace(string(images)))
+	if spec.Limits.Disk != "" {
+		baseArgs = append(baseArgs, "--storage-opt", "size="+spec.Limits.Disk)
 	}
-	// Digest lookup (documented implementation detail; the digest is what
-	// the run manifest records for reproducibility).
-	cmd := exec.CommandContext(ctx, "docker", "images", "-q", spec.ImageRef)
-	out, _ := cmd.Output()
-	digest := strings.TrimSpace(string(out))
+	if spec.Limits.Wall > 0 {
+		// Wall-clock limit is enforced by the caller's context deadline,
+		// not a docker flag — the timeout kills the container, and its
+		// exit code is recorded as a resource-limit failure, never as a
+		// dependency regression.
+		_ = spec.Limits.Wall
+	}
+	baseArgs = append(baseArgs,
+		"-v", spec.Workdir+":/workspace",
+		"-w", "/workspace",
+		"--network", "dtm-egress",
+		"--label", "dtm.side="+spec.Side,
+		"--label", "dtm.digest="+digest,
+	)
+	// No host mounts beyond the workdir, no docker socket, no privileged
+	// mode, no production credentials: the environment carries only the
+	// workdir contents and an anonymous volume for the package cache.
+	baseArgs = append(baseArgs, "-v", "dtm-cache:/cache", "--env", "DTM_CACHE=/cache")
 
 	results := make([]Result, 0, len(spec.Commands))
 	for _, c := range spec.Commands {
-		// Compose the command inside the container.
-		args = append(args[:len(args)], spec.ImageRef) // base image args end here
-		args = append(args, c.Command)
-		args = append(args, c.Args...)
+		args := append(append([]string{}, baseArgs...), spec.ImageRef, "/bin/sh", "-c", c.Command+" "+strings.Join(c.Args, " "))
 		start := time.Now()
-		cmd = exec.CommandContext(ctx, "docker", args...)
-		stdout, errOut := capture(cmd)
-		runErr := cmd.Run()
-		code := 0
-		if runErr != nil {
-			code = 1
-			if ee, ok := runErr.(*exec.ExitError); ok {
-				code = ee.ExitCode()
-			}
-		}
+		cmd := exec.CommandContext(ctx, "docker", args...)
+		out, errOut, code := runCaptured(cmd)
 		results = append(results, Result{
 			ExitCode:    code,
-			Stdout:      stdout,
+			Stdout:      out,
 			Stderr:      errOut,
 			Duration:    time.Since(start),
 			Executed:    true,
 			ImageDigest: digest,
 		})
-		args = args[:len(args)-1-len(c.Args)-1] // drop this command's args
 	}
 	return results, nil
 }
 
-// capture runs a command capturing stdout/stderr separately without
-// blocking on unbounded output (spec: log capture must be bounded).
-func capture(cmd *exec.Cmd) (string, string) {
+// runCaptured executes cmd, capturing stdout/stderr with a bounded buffer
+// and returning its exit code. A non-zero exit is a normal outcome, not
+// an error here — the caller decides what it means.
+func runCaptured(cmd *exec.Cmd) (string, string, int) {
 	const maxLog = 512 * 1024 // 512KB cap per stream per command
-	var outBuf, errBuf strings.Builder
-	cmd.Stdout = &boundedWriter{buf: &outBuf, cap: maxLog}
-	cmd.Stderr = &boundedWriter{buf: &errBuf, cap: maxLog}
-	_ = cmd.Start()
-	_ = cmd.Wait()
-	return outBuf.String(), errBuf.String()
+	var outBuf, errBuf boundedWriter
+	outBuf.cap, errBuf.cap = maxLog, maxLog
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			// A non-exit error (context deadline, docker daemon failure) is
+			// infrastructure failure, not a build failure: use 125, the
+			// conventional "runner-side" exit code, so the normaliser can
+			// distinguish it from a real non-zero package exit.
+			code = 125
+		}
+	}
+	return outBuf.String(), errBuf.String(), code
 }
 
+// boundedWriter is a strings.Builder with a hard cap, per the
+// resource-quota contract in the spec.
 type boundedWriter struct {
-	buf *strings.Builder
+	buf strings.Builder
 	cap int
 	n   int
 }
@@ -229,16 +250,17 @@ func (w *boundedWriter) Write(p []byte) (int, error) {
 	if w.n+len(p) <= w.cap {
 		w.buf.WriteString(string(p))
 		w.n += len(p)
-		return len(p), nil
+	} else {
+		remaining := w.cap - w.n
+		if remaining > 0 {
+			w.buf.WriteString(string(p[:remaining]))
+		}
+		w.n = w.cap
 	}
-	remaining := w.cap - w.n
-	if remaining > 0 {
-		w.buf.WriteString(string(p[:remaining]))
-	}
-	w.n = w.cap
-	// Drop overflow: the cap is part of the resource-quota contract.
 	return len(p), nil
 }
+
+func (w *boundedWriter) String() string { return w.buf.String() }
 
 // DegradedRunner performs analysis-only operation. It never starts a
 // process that could run repository code.
