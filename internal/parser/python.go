@@ -8,25 +8,24 @@ import (
 	"strings"
 )
 
-// DetectPython reports the presence of python manifest/lock files.
+// DetectPython reports the presence of a python manifest. The MVP parses
+// requirements-style files; a dedicated lock file (requirements.lock,
+// poetry.lock) is recorded when present but the parser's input is always
+// the manifest content itself (requirements pins are already the resolved
+// set in a lock-shaped file).
 func DetectPython(files map[string][]byte) (manifest, lock string, ok bool) {
-	for _, name := range []string{"requirements.txt", "requirements.lock", "Pipfile", "pyproject.toml", "poetry.lock"} {
+	for _, name := range []string{"requirements.txt", "requirements.lock", "Pipfile", "pyproject.toml"} {
 		if _, exists := files[name]; exists {
-			if manifest == "" {
-				manifest = name
-			}
-			switch name {
-			case "requirements.lock", "poetry.lock":
-				lock = name
-			}
+			manifest = name
+			break // first match wins; deterministic by list order
 		}
-	}
-	// A bare requirements.txt counts as manifest+lock combined.
-	if manifest == "requirements.txt" && lock == "" {
-		lock = "requirements.txt"
 	}
 	if manifest == "" {
 		return "", "", false
+	}
+	// A bare requirements.txt counts as manifest+lock combined.
+	if manifest == "requirements.txt" {
+		lock = "requirements.txt"
 	}
 	return manifest, lock, true
 }
@@ -49,7 +48,17 @@ func ParsePython(req []byte) (*GraphOut, error) {
 			continue
 		}
 		hashes := extractHashes(line)
-		spec := strings.TrimSpace(strings.Split(line, "#")[0])
+		// The requirement spec is everything before the first inline
+		// comment (#) and before the first --hash token; a pinned spec
+		// like "flask==3.0.0" carries no spaces, so cutting here is safe.
+		spec := line
+		if i := strings.Index(spec, "#"); i >= 0 {
+			spec = spec[:i]
+		}
+		if i := strings.Index(spec, "--hash"); i >= 0 {
+			spec = spec[:i]
+		}
+		spec = strings.TrimSpace(spec)
 		name, ver, ok := parseRequirementSpec(spec)
 		if !ok {
 			continue
@@ -119,8 +128,9 @@ func extractHashes(line string) []string {
 		}
 		rest = rest[idx+len("--hash="):]
 		end := len(rest)
-		for _, stop := range []string{" ", "\t", "\n", "#"} {
-			if j := strings.IndexByte(rest, rune(stop[0])); j >= 0 && j < end {
+		stopSet := []byte{' ', '\t', '\n', '#'}
+		for _, stop := range stopSet {
+			if j := strings.IndexByte(rest, stop); j >= 0 && j < end {
 				end = j
 			}
 		}
