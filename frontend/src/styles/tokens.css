@@ -1,0 +1,111 @@
+/* Dependency Time Machine — design tokens.
+   Palette: F · Pure Monochrome (spec §11). Dark-first; light theme is
+   designed, not inverted. Semantic colours stay accessible on both. */
+
+:root {
+  /* Motion + base scale */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-150: 150ms;
+  --dur-250: 250ms;
+  --dur-400: 400ms;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radii: restrained, consistent (spec: 6–12px, no oversized cards) */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+
+  /* Typography (self-hosted families, see fonts/README.md) */
+  --font-display: "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Geist Mono", "SFMono-Regular", ui-monospace, "Menlo", monospace;
+  --tracking-display: -0.02em;
+  --tracking-label: 0.01em;
+}
+
+/* ---- Dark theme (default) ---- */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #090909;
+  --surface-1: #171717; /* elevated */
+  --surface-2: #303030; /* structural */
+  --surface-3: #3d3d3d;
+
+  --border-subtle: #2a2a2a;
+  --border-strong: #4a4a4a;
+
+  --text-primary: #fafafa;
+  --text-secondary: #bdbdbd;
+  --text-muted: #737373;
+
+  --accent: #bdbdbd; /* highlight accent */
+  --accent-hover: #fafafa;
+
+  --focus-ring: 0 0 0 2px #090909, 0 0 0 4px #fafafa;
+
+  /* Semantic — desaturated to sit inside the monochrome identity while
+     remaining distinguishable and ≥4.5:1 against the canvas. */
+  --success: #7fd6a2;
+  --warning: #e0c07f;
+  --danger: #e08c8c;
+  --info: #9ab6d6;
+
+  /* Graph node/edge states (monochrome, per spec) */
+  --graph-node: #bdbdbd;
+  --graph-node-changed: #fafafa;
+  --graph-edge: #3a3a3a;
+  --graph-edge-changed: #737373;
+
+  --bg-texture-opacity: 0.05;
+}
+
+/* ---- Light theme (designed: raised contrast, warmer neutrals) ---- */
+[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: #fafafa;
+  --surface-1: #ffffff;
+  --surface-2: #ededed;
+  --surface-3: #e0e0e0;
+
+  --border-subtle: #e4e4e4;
+  --border-strong: #b4b4b4;
+
+  --text-primary: #0a0a0a;
+  --text-secondary: #4d4d4d;
+  --text-muted: #8a8a8a;
+
+  --accent: #4d4d4d;
+  --accent-hover: #0a0a0a;
+
+  --focus-ring: 0 0 0 2px #fafafa, 0 0 0 4px #4d4d4d;
+
+  --success: #2e7d4f;
+  --warning: #8a6d2f;
+  --danger: #a33f3f;
+  --info: #3f5f80;
+
+  --graph-node: #4d4d4d;
+  --graph-node-changed: #0a0a0a;
+  --graph-edge: #c9c9c9;
+  --graph-edge-changed: #8a8a8a;
+
+  --bg-texture-opacity: 0.06;
+}
+
+/* Reduced motion: disable all transition/animation durations. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-150: 0.001ms;
+    --dur-250: 0.001ms;
+    --dur-400: 0.001ms;
+  }
+}
