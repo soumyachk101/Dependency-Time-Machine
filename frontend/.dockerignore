@@ -1,0 +1,16 @@
+# Frontend image build context is the product root; this file is picked up
+# as .dockerignore when building with the root context. The frontend-only
+# entries that matter for dockerignore are the same as the root's:
+#
+#   frontend/node_modules/
+#   frontend/dist/
+#   frontend/.env
+#
+# The root .dockerignore already excludes these. A per-directory
+# .dockerignore (this file) only takes effect when the build context is
+# frontend/ itself:
+node_modules/
+dist/
+.env
+.git
+*.log
